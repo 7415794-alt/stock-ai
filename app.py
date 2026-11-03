@@ -115,3 +115,6 @@ st.divider()
 st.caption("⚠️ 본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
            "주가는 뉴스·실적·거시경제 등 모델이 보지 못하는 요인에 크게 좌우되며, "
            "투자 판단과 그 결과의 책임은 본인에게 있습니다.")
+
+# 앱(pwa/index.html)이 화면 맨 아래를 잘라내므로, 마지막 내용이 가려지지 않게 여백 추가
+st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)

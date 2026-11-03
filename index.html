@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>주식 AI 확률 분석</title>
+  <meta name="description" content="종목을 검색하면 AI가 상승·하락 확률을 분석해 드립니다.">
+  <meta name="theme-color" content="#181f38">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <style>
+    html, body { margin: 0; height: 100%; background: #ffffff; overflow: hidden; }
+    /* iframe을 아래로 길게 늘려서, 맨 아래 'Built with Streamlit · Fullscreen' 줄을 화면 밖으로 잘라냄 */
+    iframe { border: 0; width: 100%; height: calc(100% + var(--footer)); display: block; }
+    :root { --footer: 44px; }
+  </style>
+</head>
+<body>
+  <!-- Streamlit Cloud 앱 주소. 바뀌면 여기만 고치세요. -->
+  <iframe src="https://stock-ai-kaenttckxxdt5wj5uxxwnl.streamlit.app/?embed=true"
+          title="주식 AI 확률 분석" allow="clipboard-write"></iframe>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+  </script>
+</body>
+</html>
