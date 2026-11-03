@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,16 +12,13 @@ import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-# 한글 이름으로 자주 검색되는 종목 (yfinance 검색은 한글을 잘 못 찾음)
+KRX_CSV = Path(__file__).with_name("krx_stocks.csv")  # build_stock_list.py로 생성
+MAX_RESULTS = 30
+
+# 공식 종목명과 다른 별칭, 한글로 부르는 해외 종목 (yfinance 검색은 한글을 못 찾음)
 KOREAN_NAMES = {
-    "삼성전자": "005930.KS", "sk하이닉스": "000660.KS", "하이닉스": "000660.KS",
-    "lg에너지솔루션": "373220.KS", "삼성바이오로직스": "207940.KS", "현대차": "005380.KS",
-    "현대자동차": "005380.KS", "기아": "000270.KS", "셀트리온": "068270.KS",
-    "네이버": "035420.KS", "naver": "035420.KS", "카카오": "035720.KS",
-    "posco홀딩스": "005490.KS", "포스코": "005490.KS", "lg화학": "051910.KS",
-    "삼성sdi": "006400.KS", "kb금융": "105560.KS", "신한지주": "055550.KS",
-    "한화에어로스페이스": "012450.KS", "삼성물산": "028260.KS", "현대모비스": "012330.KS",
-    "에코프로": "086520.KQ", "에코프로비엠": "247540.KQ", "알테오젠": "196170.KQ",
+    "하이닉스": "000660.KS", "현대자동차": "005380.KS", "네이버": "035420.KS",
+    "포스코": "005490.KS",
     "애플": "AAPL", "테슬라": "TSLA", "엔비디아": "NVDA", "마이크로소프트": "MSFT",
     "구글": "GOOGL", "알파벳": "GOOGL", "아마존": "AMZN", "메타": "META",
     "넷플릭스": "NFLX", "팔란티어": "PLTR", "브로드컴": "AVGO", "amd": "AMD",
@@ -52,16 +51,44 @@ class Prediction:
     importances: pd.Series
 
 
+def _norm(s: str) -> str:
+    return s.lower().replace(" ", "")
+
+
+@lru_cache(maxsize=1)
+def load_krx() -> pd.DataFrame:
+    if not KRX_CSV.exists():
+        return pd.DataFrame(columns=["name", "code", "ticker", "market", "key"])
+    df = pd.read_csv(KRX_CSV, dtype=str, encoding="utf-8")
+    return df.assign(key=df["name"].map(_norm))
+
+
 def resolve_ticker(query: str) -> list[tuple[str, str]]:
     """검색어를 (티커, 표시이름) 후보 목록으로 변환."""
     q = query.strip()
     if not q:
         return []
-    key = q.lower().replace(" ", "")
+    key = _norm(q)
+    krx = load_krx()
+
+    if re.fullmatch(r"\d{6}", q):  # 한국 종목코드
+        hit = krx[krx["code"] == q]
+        if not hit.empty:
+            r = hit.iloc[0]
+            return [(r["ticker"], f"{r['name']} ({r['market']})")]
+        return [(f"{q}.KS", q), (f"{q}.KQ", q)]
+
+    # 코스피·코스닥 전 종목: 정확히 일치 → 앞부분 일치 → 포함 순으로 정렬
+    hits = krx[krx["key"].str.contains(key, regex=False)]
+    if not hits.empty:
+        rank = hits["key"].map(lambda k: 0 if k == key else 1 if k.startswith(key) else 2)
+        hits = hits.assign(rank=rank, length=hits["key"].str.len()).sort_values(["rank", "length"])
+        results = [(r.ticker, f"{r.name} ({r.market})") for r in hits.head(MAX_RESULTS).itertuples()]
+        if key in KOREAN_NAMES and KOREAN_NAMES[key] not in [t for t, _ in results]:
+            results.insert(0, (KOREAN_NAMES[key], q))
+        return results
     if key in KOREAN_NAMES:
         return [(KOREAN_NAMES[key], q)]
-    if re.fullmatch(r"\d{6}", q):  # 한국 종목코드
-        return [(f"{q}.KS", q), (f"{q}.KQ", q)]
 
     results = []
     try:

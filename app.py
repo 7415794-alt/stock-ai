@@ -6,7 +6,8 @@ from predictor import FEATURE_LABELS, predict, resolve_ticker
 
 st.set_page_config(page_title="주식 AI 확률 분석", page_icon="📈", layout="centered")
 st.title("📈 주식 AI 상승/하락 확률 분석")
-st.caption("종목명(삼성전자, 테슬라), 종목코드(005930), 티커(AAPL)로 검색하세요.")
+st.caption("코스피·코스닥 전 종목과 해외 주식을 검색할 수 있어요. "
+           "종목명 일부(삼성), 종목코드(005930), 티커(AAPL) 모두 됩니다.")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
