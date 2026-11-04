@@ -175,8 +175,11 @@ def _track_record(close: pd.Series, prob_up: pd.Series, horizon: int) -> pd.Data
     return t
 
 
-def predict(ticker: str, name: str = "", horizon: int = 5) -> Prediction:
-    df = load_history(ticker)
+def predict(ticker: str, name: str = "", horizon: int = 5,
+            df: pd.DataFrame | None = None, currency: str | None = None) -> Prediction:
+    """df·currency를 주면 다시 받지 않음 (전 종목 순위 계산용)."""
+    if df is None:
+        df = load_history(ticker)
     if len(df) < 300:
         raise ValueError("과거 데이터가 너무 적어 분석할 수 없습니다 (최소 약 300거래일 필요).")
 
@@ -223,11 +226,12 @@ def predict(ticker: str, name: str = "", horizon: int = 5) -> Prediction:
     except ValueError:
         auc = float("nan")
 
-    info_currency = "KRW" if ticker.endswith((".KS", ".KQ")) else "USD"
-    try:
-        info_currency = yf.Ticker(ticker).fast_info.get("currency") or info_currency
-    except Exception:
-        pass
+    info_currency = currency or ("KRW" if ticker.endswith((".KS", ".KQ")) else "USD")
+    if currency is None:
+        try:
+            info_currency = yf.Ticker(ticker).fast_info.get("currency") or info_currency
+        except Exception:
+            pass
 
     return Prediction(
         ticker=ticker,
