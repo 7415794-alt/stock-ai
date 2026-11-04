@@ -49,6 +49,7 @@ class Prediction:
     history: pd.DataFrame
     latest_features: pd.Series
     importances: pd.Series
+    track: pd.DataFrame  # 날짜별 예측과 실제 결과 (적중 기록)
 
 
 def _norm(s: str) -> str:
@@ -142,6 +143,19 @@ def _model() -> RandomForestClassifier:
     )
 
 
+def _track_record(close: pd.Series, prob_up: pd.Series, horizon: int) -> pd.DataFrame:
+    """각 날짜의 예측(50% 기준)이 horizon 거래일 뒤 실제로 맞았는지. 기간이 덜 지났으면 현재가로 중간 판정."""
+    t = pd.DataFrame({"prob_up": prob_up})
+    pos = close.index.get_indexer(t.index)
+    end_pos = np.minimum(pos + horizon, len(close) - 1)
+    # 결과일이 최신 날짜면 장중 가격일 수 있으므로 아직 확정이 아닌 것으로 봄
+    t["done"] = pos + horizon < len(close) - 1
+    t["end_date"] = close.index[end_pos]
+    t["ret"] = close.iloc[end_pos].to_numpy() / close.iloc[pos].to_numpy() - 1
+    t["hit"] = (t["prob_up"] >= 0.5) == (t["ret"] > 0)
+    return t
+
+
 def predict(ticker: str, name: str = "", horizon: int = 5) -> Prediction:
     df = load_history(ticker)
     if len(df) < 300:
@@ -159,20 +173,31 @@ def predict(ticker: str, name: str = "", horizon: int = 5) -> Prediction:
     n_folds, gap = 5, horizon
     fold = len(X) // (n_folds + 1)
     preds, probs, truth, baseline = [], [], [], []
+    oos = []  # 각 날짜에 그 이전 데이터로만 학습한 모델이 낸 확률 (적중 기록용)
     for k in range(1, n_folds + 1):
-        train_end, test_end = fold * k, fold * (k + 1)
+        train_end = fold * k
+        test_end = len(X) if k == n_folds else fold * (k + 1)  # 마지막 구간은 최근 날짜까지
         Xtr, ytr = X.iloc[: train_end - gap], y.iloc[: train_end - gap]
         Xte, yte = X.iloc[train_end:test_end], y.iloc[train_end:test_end]
         m = _model().fit(Xtr, ytr)
         p = m.predict_proba(Xte)[:, 1]
+        oos.append(pd.Series(p, index=Xte.index))
         probs.extend(p)
-        preds.extend((p > 0.5).astype(int))
+        preds.extend((p >= 0.5).astype(int))
         truth.extend(yte)
         baseline.extend([int(ytr.mean() > 0.5)] * len(yte))  # "항상 다수 방향" 기준선
 
     final = _model().fit(X, y)
-    latest = feats[list(FEATURE_LABELS)].dropna().iloc[-1]
+    all_feats = feats[list(FEATURE_LABELS)].dropna()
+    latest = all_feats.iloc[-1]
     prob_up = float(final.predict_proba(latest.to_frame().T)[0, 1])
+
+    # 결과가 아직 안 나온 최근 날짜들: 마지막 검증 모델로 예측, 최신 날짜는 화면의 현재 예측과 동일
+    pending = all_feats[all_feats.index > X.index[-1]].iloc[:-1]
+    if len(pending):
+        oos.append(pd.Series(m.predict_proba(pending)[:, 1], index=pending.index))
+    oos.append(pd.Series([prob_up], index=[all_feats.index[-1]]))
+    track = _track_record(df["Close"], pd.concat(oos), horizon)
 
     try:
         auc = roc_auc_score(truth, probs)
@@ -199,4 +224,5 @@ def predict(ticker: str, name: str = "", horizon: int = 5) -> Prediction:
         history=df,
         latest_features=latest,
         importances=pd.Series(final.feature_importances_, index=X.columns).sort_values(),
+        track=track,
     )

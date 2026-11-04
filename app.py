@@ -89,6 +89,39 @@ else:
 st.caption(f"검증 방식: {p.n_samples:,}개 거래일을 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀본 결과 "
            "(워크포워드). AUC 0.5 = 동전 던지기 수준.")
 
+# ── 적중 기록 ───────────────────────────────────────
+st.markdown("### 🎯 AI 적중 기록")
+t = p.track
+done = t[t["done"]].iloc[-60:]
+live = t[~t["done"]].iloc[:-1]  # 최신 날짜(방금 낸 예측)는 제외
+hits = int(done["hit"].sum())
+a1, a2, a3 = st.columns(3)
+a1.metric(f"최근 {len(done)}번 적중률", f"{done['hit'].mean() * 100:.1f}%",
+          f"성공 {hits} · 실패 {len(done) - hits}", delta_color="off")
+a2.metric("'항상 상승' 찍기", f"{(done['ret'] > 0).mean() * 100:.1f}%")
+if len(live):
+    a3.metric("진행 중 예측", f"{int(live['hit'].sum())}/{len(live)} 맞는 중")
+
+latest_date = t.index[-1]
+rows = []
+for d, r in t.iloc[-20:][::-1].iterrows():
+    if d == latest_date:
+        result, ret, verdict = "결과 대기", "-", "🆕 최신 예측"
+    elif r["done"]:
+        result, ret = f"{r['end_date']:%m/%d} 확정", f"{r['ret'] * 100:+.2f}%"
+        verdict = "✅ 성공" if r["hit"] else "❌ 실패"
+    else:
+        result, ret = "진행 중(현재가)", f"{r['ret'] * 100:+.2f}%"
+        verdict = "⏳ 맞는 중" if r["hit"] else "⏳ 틀리는 중"
+    rows.append({"예측한 날": f"{d:%m/%d}", "AI 상승 확률": f"{r['prob_up'] * 100:.0f}%",
+                 "AI 예측": "📈 상승" if r["prob_up"] >= 0.5 else "📉 하락",
+                 "결과": result, "실제 수익률": ret, "판정": verdict})
+st.dataframe(rows, hide_index=True, use_container_width=True)
+st.caption(f"상승 확률 50% 이상이면 '상승', 미만이면 '하락' 예측으로 보고, 예측한 날 종가와 {p.horizon}거래일 뒤 종가를 "
+           "비교해 판정합니다. 기간이 덜 지난 예측은 현재가로 중간 판정합니다. "
+           "과거 예측은 모두 그 날짜 이전 데이터로만 학습한 모델의 결과입니다. "
+           "현재가는 약 20~30분 늦을 수 있습니다.")
+
 # ── 차트 ────────────────────────────────────────────
 st.markdown("### 📊 최근 1년 주가")
 h = p.history.iloc[-252:]
