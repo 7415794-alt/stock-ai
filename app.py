@@ -2,7 +2,7 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from predictor import FEATURE_LABELS, predict, resolve_ticker
+from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
 
 st.set_page_config(page_title="주식 AI 확률 분석", page_icon="📈", layout="centered")
 st.title("📈 주식 AI 상승/하락 확률 분석")
@@ -18,6 +18,15 @@ def cached_search(q):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_predict(ticker, name, horizon):
     return predict(ticker, name, horizon)
+
+
+@st.cache_data(ttl=60, show_spinner=False)  # 현재가는 1분마다 새로
+def cached_live(ticker):
+    return live_price(ticker)
+
+
+def money(v, cur):
+    return f"{v:,.0f}원" if cur == "KRW" else f"{v:,.2f} {cur}"
 
 
 col_q, col_h = st.columns([3, 1])
@@ -47,9 +56,14 @@ except Exception as e:
     st.stop()
 
 # ── 결과 ───────────────────────────────────────────
-last = p.history["Close"].iloc[-1]
+lp = cached_live(ticker)
+if lp:
+    last, when = lp
+    when_txt = f"{when:%Y-%m-%d %H:%M} 기준 (무료 데이터라 약 20분 늦을 수 있어요)"
+else:
+    last, when_txt = p.history["Close"].iloc[-1], f"기준일 {p.history.index[-1]:%Y-%m-%d}"
 st.subheader(f"{p.name} ({p.ticker})")
-st.write(f"현재가 **{last:,.2f} {p.currency}** · 기준일 {p.history.index[-1]:%Y-%m-%d}")
+st.write(f"현재가 **{money(last, p.currency)}** · {when_txt}")
 
 up = p.prob_up * 100
 c1, c2 = st.columns(2)
@@ -91,7 +105,10 @@ st.caption(f"검증 방식: {p.n_samples:,}개 거래일을 시간순으로 나�
 
 # ── 적중 기록 ───────────────────────────────────────
 st.markdown("### 🎯 AI 적중 기록")
-t = p.track
+t = p.track.copy()
+# 아직 기간이 안 끝난 예측은 방금 받은 현재가로 다시 판정
+t.loc[~t["done"], "ret"] = last / t.loc[~t["done"], "start"] - 1
+t["hit"] = (t["prob_up"] >= 0.5) == (t["ret"] > 0)
 done = t[t["done"]].iloc[-60:]
 live = t[~t["done"]].iloc[:-1]  # 최신 날짜(방금 낸 예측)는 제외
 hits = int(done["hit"].sum())
@@ -120,7 +137,7 @@ st.dataframe(rows, hide_index=True, use_container_width=True)
 st.caption(f"상승 확률 50% 이상이면 '상승', 미만이면 '하락' 예측으로 보고, 예측한 날 종가와 {p.horizon}거래일 뒤 종가를 "
            "비교해 판정합니다. 기간이 덜 지난 예측은 현재가로 중간 판정합니다. "
            "과거 예측은 모두 그 날짜 이전 데이터로만 학습한 모델의 결과입니다. "
-           "현재가는 약 20~30분 늦을 수 있습니다.")
+           "현재가는 1분마다 새로 받아오지만, 무료 데이터라 약 20분 늦을 수 있습니다.")
 
 # ── 차트 ────────────────────────────────────────────
 st.markdown("### 📊 최근 1년 주가")

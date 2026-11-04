@@ -109,6 +109,24 @@ def load_history(ticker: str, years: int = 10) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
 
 
+def live_price(ticker: str) -> tuple[float, pd.Timestamp] | None:
+    """가장 최근 거래 가격과 그 시각 (장 마감 후엔 종가, 무료 데이터라 한국 주식은 약 20분 늦음)."""
+    try:
+        tk = yf.Ticker(ticker)
+        h = tk.history(period="5d")["Close"].dropna()
+        m = tk.history_metadata or {}
+        price = m.get("regularMarketPrice") or (float(h.iloc[-1]) if len(h) else None)
+        when = m.get("regularMarketTime")
+        if price:
+            if isinstance(when, (int, float)):  # 버전에 따라 초 단위 숫자로 올 때
+                when = pd.Timestamp(when, unit="s", tz="UTC").tz_convert(m.get("exchangeTimezoneName", "UTC"))
+            when = pd.Timestamp(when) if when is not None else h.index[-1]
+            return float(price), when
+    except Exception:
+        pass
+    return None
+
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     c, v = df["Close"], df["Volume"]
     f = pd.DataFrame(index=df.index)
@@ -151,7 +169,8 @@ def _track_record(close: pd.Series, prob_up: pd.Series, horizon: int) -> pd.Data
     # 결과일이 최신 날짜면 장중 가격일 수 있으므로 아직 확정이 아닌 것으로 봄
     t["done"] = pos + horizon < len(close) - 1
     t["end_date"] = close.index[end_pos]
-    t["ret"] = close.iloc[end_pos].to_numpy() / close.iloc[pos].to_numpy() - 1
+    t["start"] = close.iloc[pos].to_numpy()  # 예측한 날 종가
+    t["ret"] = close.iloc[end_pos].to_numpy() / t["start"] - 1
     t["hit"] = (t["prob_up"] >= 0.5) == (t["ret"] > 0)
     return t
 
