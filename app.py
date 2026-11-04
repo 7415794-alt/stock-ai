@@ -30,17 +30,30 @@ def money(v, cur):
     return f"{v:,.0f}원" if cur == "KRW" else f"{v:,.2f} {cur}"
 
 
+def footer():
+    """맨 아래 안내 (어느 화면에서 멈추든 항상 보이게)."""
+    st.divider()
+    st.caption("⚠️ 본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
+               "주가는 뉴스·실적·거시경제 등 모델이 보지 못하는 요인에 크게 좌우되며, "
+               "투자 판단과 그 결과의 책임은 본인에게 있습니다.")
+    st.caption("📮 오류나 문의 사항은 [slakeknowledge@gmail.com](mailto:slakeknowledge@gmail.com) 으로 보내 주세요.")
+    # 앱(pwa/index.html)이 화면 맨 아래를 잘라내므로, 마지막 내용이 가려지지 않게 여백 추가
+    st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
+
+
 col_q, col_h = st.columns([3, 1])
 query = col_q.text_input("종목 검색", placeholder="예: 삼성전자, NVDA, 005930")
 horizon = col_h.selectbox("예측 기간", [1, 5, 20], index=1, format_func=lambda d: f"{d}거래일 후")
 
 if not query:
+    footer()
     st.stop()
 
 with st.spinner("종목 검색 중..."):
     candidates = cached_search(query)
 if not candidates:
     st.warning("검색 결과가 없습니다.")
+    footer()
     st.stop()
 
 if len(candidates) > 1:
@@ -54,6 +67,7 @@ try:
         p = cached_predict(ticker, name, horizon)
 except Exception as e:
     st.error(f"분석 실패: {e}")
+    footer()
     st.stop()
 
 # ── 결과 ───────────────────────────────────────────
@@ -162,10 +176,4 @@ for k in p.importances.index[::-1]:
     rows.append({"지표": FEATURE_LABELS[k], "현재 값": val, "중요도": f"{p.importances[k] * 100:.1f}%"})
 st.dataframe(rows, hide_index=True, use_container_width=True)
 
-st.divider()
-st.caption("⚠️ 본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
-           "주가는 뉴스·실적·거시경제 등 모델이 보지 못하는 요인에 크게 좌우되며, "
-           "투자 판단과 그 결과의 책임은 본인에게 있습니다.")
-
-# 앱(pwa/index.html)이 화면 맨 아래를 잘라내므로, 마지막 내용이 가려지지 않게 여백 추가
-st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
+footer()
