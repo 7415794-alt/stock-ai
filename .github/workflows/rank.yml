@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "0 8 * * 1-5"   # 월~금 08:00 UTC = 한국시간 오후 5시
   workflow_dispatch:         # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
+  push:                      # 이 파일이나 계산 코드를 고쳐서 올리면 바로 한 번 실행
+    branches: [main]
+    paths: [".github/workflows/rank.yml", "rank_build.py"]
 
 permissions:
   contents: write
