@@ -1,0 +1,56 @@
+# 매일 장 마감 뒤 코스피·코스닥 전 종목을 계산해서 순위 파일을 'data' 브랜치에 저장합니다.
+name: AI 순위 계산
+
+on:
+  schedule:
+    - cron: "0 8 * * 1-5"   # 월~금 08:00 UTC = 한국시간 오후 5시
+  workflow_dispatch:         # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python rank_build.py part ${{ matrix.part }} 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.part }}
+          path: parts/
+
+  merge:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts/
+      - run: python rank_build.py merge
+      - name: data 브랜치에 저장
+        run: |
+          cd out
+          git init -q -b data
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add rankings.csv meta.json
+          git commit -q -m "순위 갱신 $(date -u +%F)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
