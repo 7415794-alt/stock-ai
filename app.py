@@ -1,11 +1,15 @@
 """주식 AI 상승/하락 확률 분석 앱. 실행: streamlit run app.py"""
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
 
-st.set_page_config(page_title="주식 AI 확률 분석", page_icon="📈", layout="centered")
-st.title("📈 주식 AI 상승/하락 확률 분석")
+st.set_page_config(page_title="스톡시그널", page_icon="📈", layout="centered")
+# 앱 껍데기(pwa/index.html)에 "화면이 다 떴어요" 신호를 보냄. 신호가 안 오면 껍데기가 자동으로 다시 불러옴
+components.html("<script>window.top.postMessage('stock-ai-ready', '*')</script>", height=0)
+st.title("📈 스톡시그널")
+st.markdown("**주식 AI 상승/하락 확률 분석**")
 st.caption("코스피·코스닥 전 종목과 해외 주식을 검색할 수 있어요. "
            "종목명 일부(삼성), 종목코드(005930), 티커(AAPL) 모두 됩니다.")
 
