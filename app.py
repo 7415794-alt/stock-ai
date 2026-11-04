@@ -16,7 +16,8 @@ def cached_search(q):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_predict(ticker, name, horizon):
+def cached_predict(ticker, name, horizon, version=2):
+    # predictor.py의 결과 모양을 바꾸면 version 숫자를 올려서, 예전에 저장된 결과를 쓰지 않게 함
     return predict(ticker, name, horizon)
 
 
