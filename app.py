@@ -75,6 +75,7 @@ div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
 .warn { background: rgba(245,158,11,.15); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: -4px 0 10px; }
 .st-key-vote [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px; }
 .st-key-vote [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
+.st-key-nav_back { display: none; }  /* 휴대폰 '뒤로 가기'용 숨은 버튼 */
 .vs { background: rgba(128,128,128,.08); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 4px 0 8px; }
 </style>""", unsafe_allow_html=True)
 
@@ -1321,6 +1322,26 @@ def keep_page():
 
 if st.session_state.page not in PAGES:  # 예전 메뉴 이름이 남아 있을 때
     st.session_state.page = st.session_state.page_last = PAGES[0]
+
+
+def nav_back():
+    """휴대폰 '뒤로 가기': 바로 전에 보던 화면(메뉴·검색한 종목)으로 되돌림."""
+    nav = st.session_state.get("nav", [])
+    if len(nav) > 1:
+        nav.pop()
+        page_, query_ = nav[-1]
+        st.session_state.page = st.session_state.page_last = page_
+        st.session_state.query = query_
+        st.session_state.to_top = True
+
+
+# 지금 보는 화면을 기록 (메뉴나 검색 종목이 바뀔 때마다 한 칸씩)
+_nav = st.session_state.setdefault("nav", [])
+_cur = (st.session_state.page, st.session_state.get("query") or "")
+if not _nav or _nav[-1] != _cur:
+    _nav.append(_cur)
+    del _nav[:-30]
+st.button("뒤로", key="nav_back", on_click=nav_back)
 clock = cached_clock()
 st.markdown(f'<div class="clock"><b>{clock["label"]}</b> · {clock["note"]}</div>', unsafe_allow_html=True)
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
@@ -1360,4 +1381,27 @@ components.html("<script>window.top.postMessage(" + json.dumps(
                       for t, n, pr, q in st.session_state.get("hold", [])),
      "votes": ",".join(f"{t}~{n.replace(',', ' ').replace('~', ' ')}~{h}~{d}~{pr:.10g}~{me}~{ai}"
                        for t, n, h, d, pr, me, ai in st.session_state.get("votes", []))}, ensure_ascii=False) + ", '*')</script>", height=0)
+# 휴대폰 뒤로 가기 버튼 연결: 화면이 바뀌면 브라우저 기록에 한 칸 추가, 뒤로 가기를 누르면 숨은 '뒤로' 버튼을 눌러 줌
+components.html("""<script>
+const w = window.parent, n = %d;
+if (!w.__stockNav) {
+  w.__stockNav = true;
+  w.history.replaceState({sn: n}, "");
+  // 이 작은 창은 매번 새로 만들어지므로, 감시 코드는 앱 화면(부모 창) 쪽에 심어 둠
+  const sc = w.document.createElement("script");
+  sc.textContent = `addEventListener("popstate", (e) => {
+    const s = e.state && e.state.sn;
+    if (typeof s !== "number" || s >= window.__stockN) return;
+    window.__stockN = s;
+    const b = document.querySelector(".st-key-nav_back button");
+    if (b) b.click();
+  });`;
+  w.document.head.appendChild(sc);
+} else {
+  const cur = (w.history.state && w.history.state.sn) || 0;
+  if (n > cur) w.history.pushState({sn: n}, "");
+  else if (n < cur) w.history.replaceState({sn: n}, "");
+}
+w.__stockN = n;
+</script>""" % len(_nav), height=0)
 footer()
