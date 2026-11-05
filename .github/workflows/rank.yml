@@ -56,5 +56,6 @@ jobs:
           git config user.email "github-actions@users.noreply.github.com"
           git add rankings.csv meta.json
           [ -f prev_rankings.csv ] && git add prev_rankings.csv
+          [ -f scorecard.csv ] && git add scorecard.csv
           git commit -q -m "순위 갱신 $(date -u +%F)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
