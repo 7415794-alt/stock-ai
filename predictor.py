@@ -12,6 +12,8 @@ import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
 
+from indicators import D1_LABELS, build_1d, cols_for
+
 KRX_CSV = Path(__file__).with_name("krx_stocks.csv")  # build_stock_list.py로 생성
 MAX_RESULTS = 30
 
@@ -32,6 +34,20 @@ FEATURE_LABELS = {
     "vol_20": "20일 변동성", "volume_ratio": "거래량 비율(20일 평균 대비)",
     "dist_52w_high": "52주 고점 대비",
 }
+BASE_FEATURES = list(FEATURE_LABELS)
+
+# 시장 전체 흐름 (코스피·코스닥·S&P 500 지수). 종목 혼자보다 시장 분위기를 함께 보면 더 잘 맞는지 확인해서 씀
+MARKET_LABELS = {
+    "mkt_ret_5": "시장 5일 수익률", "mkt_ret_20": "시장 20일 수익률",
+    "mkt_sma20_ratio": "시장 20일선 대비", "mkt_vol_20": "시장 변동성",
+    "rel_ret_5": "시장 대비 5일 수익률", "rel_ret_20": "시장 대비 20일 수익률",
+}
+FEATURE_LABELS.update(MARKET_LABELS)
+USE_MARKET = False  # 시험 결과 정확도가 오르지 않아 꺼 둠
+USE_1D_SET = True  # 지표 50가지 표 사용 여부
+SET_HORIZONS = (1, 5, 20)  # 50가지 표로 예측하는 기간
+FEATURE_LABELS.update(D1_LABELS)
+_INDEX_CACHE: dict[str, tuple[float, pd.Series]] = {}
 
 
 @dataclass
@@ -56,12 +72,25 @@ def _norm(s: str) -> str:
     return s.lower().replace(" ", "")
 
 
+CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+
+
+def chosung(s: str) -> str:
+    """'삼성전자' → 'ㅅㅅㅈㅈ' (한글 아닌 글자는 그대로)."""
+    return "".join(CHO[(ord(ch) - 0xAC00) // 588] if "가" <= ch <= "힣" else ch for ch in _norm(s))
+
+
+def is_chosung_query(q: str) -> bool:
+    """초성(ㄱ~ㅎ)이 들어 있고 완성된 한글 글자는 없는 검색어."""
+    return any(ch in CHO for ch in q) and not any("가" <= ch <= "힣" for ch in q)
+
+
 @lru_cache(maxsize=1)
 def load_krx() -> pd.DataFrame:
     if not KRX_CSV.exists():
         return pd.DataFrame(columns=["name", "code", "ticker", "market", "key"])
     df = pd.read_csv(KRX_CSV, dtype=str, encoding="utf-8")
-    return df.assign(key=df["name"].map(_norm))
+    return df.assign(key=df["name"].map(_norm), cho=df["name"].map(chosung))
 
 
 def resolve_ticker(query: str) -> list[tuple[str, str]]:
@@ -79,10 +108,11 @@ def resolve_ticker(query: str) -> list[tuple[str, str]]:
             return [(r["ticker"], f"{r['name']} ({r['market']})")]
         return [(f"{q}.KS", q), (f"{q}.KQ", q)]
 
-    # 코스피·코스닥 전 종목: 정확히 일치 → 앞부분 일치 → 포함 순으로 정렬
-    hits = krx[krx["key"].str.contains(key, regex=False)]
+    # 코스피·코스닥 전 종목: 정확히 일치 → 앞부분 일치 → 포함 순으로 정렬 (초성만 넣으면 초성으로 찾기)
+    col = "cho" if is_chosung_query(key) else "key"
+    hits = krx[krx[col].str.contains(key, regex=False)]
     if not hits.empty:
-        rank = hits["key"].map(lambda k: 0 if k == key else 1 if k.startswith(key) else 2)
+        rank = hits[col].map(lambda k: 0 if k == key else 1 if k.startswith(key) else 2)
         hits = hits.assign(rank=rank, length=hits["key"].str.len()).sort_values(["rank", "length"])
         results = [(r.ticker, f"{r.name} ({r.market})") for r in hits.head(MAX_RESULTS).itertuples()]
         if key in KOREAN_NAMES and KOREAN_NAMES[key] not in [t for t, _ in results]:
@@ -127,7 +157,29 @@ def live_price(ticker: str) -> tuple[float, pd.Timestamp] | None:
     return None
 
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+def market_index(ticker: str) -> str:
+    return "^KS11" if ticker.endswith(".KS") else "^KQ11" if ticker.endswith(".KQ") else "^GSPC"
+
+
+def load_index(symbol: str) -> pd.Series | None:
+    """지수 종가 (날짜 → 값). 1시간 동안 재사용."""
+    import time
+    hit = _INDEX_CACHE.get(symbol)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    try:
+        c = yf.Ticker(symbol).history(period="10y", auto_adjust=True)["Close"].dropna()
+        c.index = c.index.tz_localize(None).normalize()
+        c = c[~c.index.duplicated(keep="last")]
+    except Exception:
+        return hit[1] if hit else None
+    if len(c) < 300:
+        return hit[1] if hit else None
+    _INDEX_CACHE[symbol] = (time.time(), c)
+    return c
+
+
+def build_features(df: pd.DataFrame, mkt: pd.Series | None = None) -> pd.DataFrame:
     c, v = df["Close"], df["Volume"]
     f = pd.DataFrame(index=df.index)
     f["ret_1"] = c.pct_change(1)
@@ -150,6 +202,16 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     f["vol_20"] = c.pct_change().rolling(20).std() * np.sqrt(252)
     f["volume_ratio"] = v / v.rolling(20).mean().replace(0, np.nan)
     f["dist_52w_high"] = c / c.rolling(252, min_periods=60).max() - 1
+    if mkt is not None:
+        days = df.index.tz_localize(None).normalize() if df.index.tz is not None else df.index.normalize()
+        m = mkt.reindex(mkt.index.union(days)).ffill().reindex(days)
+        m.index = df.index
+        f["mkt_ret_5"] = m.pct_change(5)
+        f["mkt_ret_20"] = m.pct_change(20)
+        f["mkt_sma20_ratio"] = m / m.rolling(20).mean() - 1
+        f["mkt_vol_20"] = m.pct_change().rolling(20).std() * np.sqrt(252)
+        f["rel_ret_5"] = f["ret_5"] - f["mkt_ret_5"]
+        f["rel_ret_20"] = f["ret_20"] - f["mkt_ret_20"]
     return f.replace([np.inf, -np.inf], np.nan)
 
 
@@ -183,13 +245,19 @@ def predict(ticker: str, name: str = "", horizon: int = 5,
     if len(df) < 300:
         raise ValueError("과거 데이터가 너무 적어 분석할 수 없습니다 (최소 약 300거래일 필요).")
 
-    feats = build_features(df)
+    if horizon in SET_HORIZONS and USE_1D_SET:  # 1·5·20일 뒤: 지표 50가지 표(indicators.py) 중 계산할 수 있는 기술적 지표 전부
+        feats = build_1d(df, load_index(market_index(ticker)))
+        cols = cols_for(horizon)
+    else:
+        mkt = load_index(market_index(ticker)) if USE_MARKET else None
+        feats = build_features(df, mkt)
+        cols = BASE_FEATURES + (list(MARKET_LABELS) if mkt is not None else [])
     future_ret = df["Close"].shift(-horizon) / df["Close"] - 1
     data = feats.assign(target=(future_ret > 0).astype(float), future_ret=future_ret)
     data.loc[future_ret.isna(), "target"] = np.nan
 
-    labeled = data.dropna()
-    X, y = labeled[list(FEATURE_LABELS)], labeled["target"].astype(int)
+    labeled = data[cols + ["target", "future_ret"]].dropna()
+    X, y = labeled[cols], labeled["target"].astype(int)
 
     # 워크포워드 검증: 과거로 학습 → 바로 다음 구간을 예측 (미래 정보 누설 방지)
     n_folds, gap = 5, horizon
@@ -210,7 +278,7 @@ def predict(ticker: str, name: str = "", horizon: int = 5,
         baseline.extend([int(ytr.mean() > 0.5)] * len(yte))  # "항상 다수 방향" 기준선
 
     final = _model().fit(X, y)
-    all_feats = feats[list(FEATURE_LABELS)].dropna()
+    all_feats = feats[cols].dropna()
     latest = all_feats.iloc[-1]
     prob_up = float(final.predict_proba(latest.to_frame().T)[0, 1])
 

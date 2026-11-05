@@ -24,6 +24,53 @@ def market_snapshot() -> list[dict]:
     return out
 
 
+# 지표 50가지 표에서 '기본적 지표' 현재 값으로 쓰는 항목
+FIN_KEYS = ("salesIncreasingRate", "operatingProfitIncreasingRate", "roe", "per", "pbr", "dividendRate",
+            "sales", "operatingProfit", "netIncome", "propertyTotal", "debtTotal", "eps")
+
+
+def krx_status() -> dict[str, dict]:
+    """코스피·코스닥 전 종목의 거래정지·관리종목·투자주의/경고/위험 상태 (네이버 증권, 1초 정도).
+    {종목코드: {"halted": bool, "managed": bool, "alert": 0~3}}  (alert 1=투자주의 2=투자경고 3=투자위험)"""
+    s = requests.Session()
+    s.headers["User-Agent"] = "Mozilla/5.0"
+    out = {}
+    for page in range(10):
+        d = s.get("https://stock.naver.com/api/domestic/market/stock/default",
+                  params={"tradeType": "KRX", "marketType": "ALL", "orderType": "marketSum",
+                          "startIdx": page, "pageSize": 1000}, timeout=15).json()
+        for r in d:
+            out[r["itemcode"]] = {"halted": r.get("tradeStopYn") == "Y",
+                                  "managed": str(r.get("manageStatusGb")) in ("1", "2", "3"),  # 9 = 상장폐지 절차 등(거래정지로 따로 표시)
+                                  "alert": int(r.get("marketAlertType") or 0),
+                                  "fin": {k: r.get(k) for k in FIN_KEYS}}
+        if len(d) < 1000:
+            break
+    return out
+
+
+def market_clock() -> dict:
+    """한국 주식시장이 지금 열렸는지: 장 시작 전 · 장중 · 장 마감 · 휴장."""
+    now = pd.Timestamp.now(tz="Asia/Seoul")
+    if now.weekday() >= 5:
+        return {"state": "closed", "label": "💤 주말 휴장", "note": "순위·확률은 금요일 장 마감 기준이에요"}
+    traded_today = True
+    try:
+        r = requests.get("https://m.stock.naver.com/api/index/KOSPI/basic", timeout=5,
+                         headers={"User-Agent": "Mozilla/5.0"}).json()
+        traded_today = pd.Timestamp(r["localTradedAt"]).date() == now.date()
+    except Exception:
+        pass
+    hm = now.hour * 100 + now.minute
+    if hm < 900:
+        return {"state": "pre", "label": "⏰ 장 시작 전", "note": "오전 9시에 열려요"}
+    if not traded_today:
+        return {"state": "closed", "label": "💤 오늘은 휴장일", "note": "순위·확률은 지난 거래일 기준이에요"}
+    if hm < 1530:
+        return {"state": "open", "label": "🟢 장 열림", "note": "오후 3시 30분에 마감해요 · 가격은 약 20분 늦어요"}
+    return {"state": "closed", "label": "🔴 장 마감", "note": "AI 순위는 매일 오후 6시쯤 새로 계산돼요"}
+
+
 def halted(code: str) -> bool:
     """한국 종목이 지금 거래정지인지 (네이버 증권). 확인이 안 되면 False."""
     try:

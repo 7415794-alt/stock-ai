@@ -9,9 +9,10 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from market import ai_mood, company, halted, market_snapshot
+from market import ai_mood, company, halted, krx_status, market_clock, market_snapshot
 from news import adjust, fetch_news, news_score
-from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
+from indicators import build_1d, cols_for, fundamentals_now, indicators_for
+from predictor import FEATURE_LABELS, live_price, load_history, load_index, market_index, predict, resolve_ticker
 
 st.set_page_config(page_title="스톡시그널", page_icon="📈", layout="centered")
 # 앱 껍데기(pwa/index.html)에 "화면이 다 떴어요" 신호를 보냄. 신호가 안 오면 껍데기가 자동으로 다시 불러옴
@@ -60,6 +61,12 @@ div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
 .cmp th, .cmp td { padding: 7px 4px; border-bottom: 1px solid rgba(128,128,128,.2); text-align: center; border-left: none; border-right: none; }
 .cmp td:first-child { text-align: left; font-size: 12px; color: rgba(128,128,128,1); width: 32%; }
 .cmp td.win { font-weight: 700; } .cmp small { color: rgba(128,128,128,1); }
+/* 장 상태 · 위험 종목 경고 · AI vs 나 */
+.clock { font-size: 12px; color: rgba(128,128,128,1); margin: -2px 0 6px; } .clock b { color: inherit; font-weight: 600; }
+.warn { background: rgba(245,158,11,.15); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: -4px 0 10px; }
+.st-key-vote [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px; }
+.st-key-vote [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
+.vs { background: rgba(128,128,128,.08); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 4px 0 8px; }
 </style>
 <div class="brand"><b>📈 스톡시그널</b><span>주식 AI 확률 분석</span></div>""", unsafe_allow_html=True)
 
@@ -70,7 +77,7 @@ def cached_search(q):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_predict(ticker, name, horizon, version=2):
+def cached_predict(ticker, name, horizon, version=5):
     # predictor.py의 결과 모양을 바꾸면 version 숫자를 올려서, 예전에 저장된 결과를 쓰지 않게 함
     return predict(ticker, name, horizon)
 
@@ -96,6 +103,10 @@ def cached_company(ticker):
 @st.cache_data(ttl=300, show_spinner=False)  # 지수는 5분마다
 def cached_market():
     return market_snapshot()
+
+
+def predict_history(ticker):
+    return load_history(ticker, years=1)
 
 
 def kv_grid(items):
@@ -139,6 +150,9 @@ def load_rankings():
         if "halted" in df:  # 거래정지 종목은 순위·조건검색·시장 분위기 어디에도 안 나오게
             meta["halted_codes"] = sorted(df.loc[df["halted"] == 1, "ticker"].str[:6].unique())
             df = df[df["halted"] != 1].reset_index(drop=True)
+        stopped = {c for c, v in cached_status().items() if v["halted"]}  # 오늘 새로 정지된 종목도 바로 빼기
+        if stopped:
+            df = df[~df["ticker"].str[:6].isin(stopped)].reset_index(drop=True)
         return df, meta
     except Exception:
         return None, None
@@ -149,11 +163,49 @@ def cached_halted(code):
     return halted(code)
 
 
+@st.cache_data(ttl=600, show_spinner=False)  # 전 종목 상태(거래정지·관리·투자주의)는 10분마다
+def cached_status():
+    try:
+        return krx_status()
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_clock():
+    return market_clock()
+
+
+def _kr_code(ticker):
+    if ticker.endswith((".KS", ".KQ")) or (len(ticker) == 6 and ticker.isdigit()):
+        return ticker[:6]
+    return None
+
+
 def is_halted(ticker):
     """한국 종목만 확인 (해외 종목은 항상 False)."""
-    if ticker.endswith((".KS", ".KQ")) or (len(ticker) == 6 and ticker.isdigit()):
-        return cached_halted(ticker[:6])
-    return False
+    code = _kr_code(ticker)
+    if not code:
+        return False
+    stt = cached_status().get(code)
+    return stt["halted"] if stt else cached_halted(code)
+
+
+ALERTS = {1: "투자주의", 2: "투자경고", 3: "투자위험"}
+
+
+def warn_words(ticker):
+    """['관리종목', '투자경고'] 처럼 조심할 점 (없으면 빈 목록)."""
+    code = _kr_code(ticker)
+    stt = cached_status().get(code) if code else None
+    if not stt:
+        return []
+    return (["관리종목"] if stt["managed"] else []) + ([ALERTS[stt["alert"]]] if stt["alert"] in ALERTS else [])
+
+
+def warn_tag(ticker):
+    w = warn_words(ticker)
+    return f" · ⚠️{'·'.join(w)}" if w else ""
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -270,7 +322,7 @@ def remember(code, name):
 def rank_table(df, value_col, value_name, key, horizon, prev=None):
     for i, r in enumerate(df.itertuples(), 1):
         label = (f"{i}. {r.name} ({r.market}) · {value_name} **{getattr(r, value_col) * 100:.1f}%** · "
-                 f"{r.close:,.0f}원{move_txt(prev, r.ticker, i, len(df))}")
+                 f"{r.close:,.0f}원{move_txt(prev, r.ticker, i, len(df))}{warn_tag(r.ticker)}")
         st.button(label, key=f"rk_{key}_{i}", on_click=open_stock, args=(r.ticker[:6], horizon),
                   use_container_width=True)
 
@@ -418,6 +470,93 @@ def share_button(code, horizon, title, text):
 </script>""", height=40)
 
 
+def today_kst():
+    return pd.Timestamp.now(tz="Asia/Seoul").strftime("%Y-%m-%d")
+
+
+def add_vote(ticker, name, horizon, price, me, ai):
+    votes = [v for v in st.session_state.get("votes", [])
+             if not (v[0] == ticker and v[2] == horizon and v[3] == today_kst())]
+    st.session_state.votes = ([(ticker, name, horizon, today_kst(), float(price), me, int(round(ai)))] + votes)[:60]
+
+
+def vote_box(ticker, name, horizon, price, ai):
+    """AI vs 나: 오를지 내릴지 내가 먼저 찍어 보고, 나중에 AI와 누가 맞혔는지 비교."""
+    mine = next((v for v in st.session_state.get("votes", [])
+                 if v[0] == ticker and v[2] == horizon and v[3] == today_kst()), None)
+    if mine:
+        me = "📈 오른다" if mine[5] == "u" else "📉 내린다"
+        ai_txt = "📈 오른다" if mine[6] >= 50 else "📉 내린다"
+        st.markdown(f'<div class="vs">🗳 <b>AI vs 나</b> · 나: <b>{me}</b> · AI: <b>{ai_txt}</b> ({mine[6]}%)<br>'
+                    f'<small>{horizon}거래일 뒤 누가 맞혔는지 💼 내 종목 화면에서 볼 수 있어요.</small></div>',
+                    unsafe_allow_html=True)
+        return
+    st.markdown(f"**🗳 AI vs 나** · {horizon}거래일 뒤 이 종목, 나는 어떻게 생각해요?")
+    with st.container(key="vote"):
+        v1, v2 = st.columns(2)
+        v1.button("📈 오른다", key="vote_u", on_click=add_vote, args=(ticker, name, horizon, price, "u", ai),
+                  use_container_width=True)
+        v2.button("📉 내린다", key="vote_d", on_click=add_vote, args=(ticker, name, horizon, price, "d", ai),
+                  use_container_width=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_close(ticker):
+    try:
+        c = predict_history(ticker)["Close"]
+        c.index = c.index.tz_localize(None).normalize() if c.index.tz is not None else c.index.normalize()
+        return c
+    except Exception:
+        return None
+
+
+def vote_results():
+    """찍은 것들을 채점: [(vote, 끝났는지, 실제 수익률, 남은 거래일)]."""
+    out = []
+    for v in st.session_state.get("votes", []):
+        ticker, _, h, day, price = v[:5]
+        c = cached_close(ticker)
+        if c is None or c.empty:
+            continue
+        pos = max(int(c.index.searchsorted(pd.Timestamp(day), side="right")) - 1, 0)  # 찍은 날(또는 그 전 거래일)
+        end_i = pos + h  # h 거래일 뒤
+        if end_i <= len(c) - 1:
+            # 결과일이 오늘이면 장이 끝나야 확정
+            done = c.index[end_i].strftime("%Y-%m-%d") < today_kst() or cached_clock()["state"] == "closed"
+        else:
+            done = False
+        end = c.iloc[min(end_i, len(c) - 1)]
+        out.append((v, done, float(end / price - 1), max(0, end_i - (len(c) - 1))))
+    return out
+
+
+def vote_section():
+    st.markdown("#### 🗳 AI vs 나")
+    res = vote_results()
+    if not res:
+        st.caption("종목 분석 화면에서 '📈 오른다 / 📉 내린다'를 찍어 보세요. 기간이 지나면 나와 AI 중 누가 맞혔는지 여기서 채점해요.")
+        return
+    done = [x for x in res if x[1]]
+    if done:
+        me_hit = sum((v[5] == "u") == (r > 0) for v, _, r, _ in done)
+        ai_hit = sum((v[6] >= 50) == (r > 0) for v, _, r, _ in done)
+        verdict = "🏆 내가 이기고 있어요!" if me_hit > ai_hit else "🤖 AI가 이기고 있어요" if ai_hit > me_hit else "🤝 비기고 있어요"
+        kv_grid([("나의 적중률", f"{me_hit / len(done) * 100:.0f}%", f"<small>{len(done)}번 중 {me_hit}번</small>"),
+                 ("AI 적중률", f"{ai_hit / len(done) * 100:.0f}%", f"<small>{verdict}</small>")])
+    rows = []
+    for v, ok, r, left in res[:20]:
+        me, ai = ("📈" if v[5] == "u" else "📉"), ("📈" if v[6] >= 50 else "📉")
+        if ok:
+            real = "📈" if r > 0 else "📉"
+            res_txt = f"{real} {r * 100:+.1f}% · 나 {'✅' if me == real else '❌'} AI {'✅' if ai == real else '❌'}"
+        else:
+            res_txt = f"⏳ {left}거래일 남음 ({r * 100:+.1f}%)" if left else f"⏳ 오늘 장 마감 후 결과 ({r * 100:+.1f}%)"
+        rows.append({"날짜": v[3][5:].replace("-", "/"), "종목": f"{v[1]} ({v[2]}일)", "나": me, "AI": f"{ai}{v[6]}%",
+                     "결과": res_txt})
+    st.dataframe(rows, hide_index=True, use_container_width=True)
+    st.caption("찍은 날 가격과 기간(1·5·20거래일)이 지난 날 종가를 비교해요. 같은 종목·기간은 하루에 한 번만 찍을 수 있어요.")
+
+
 def halted_view(p, close, news):
     """거래정지 종목: 확률은 보여 주지 않고 차트·뉴스·기업 정보만."""
     st.markdown('<div class="hero"><div class="big">⛔ 거래정지</div>'
@@ -503,6 +642,11 @@ def analysis_tab():
                          f"{short} 거래정지 중 (스톡시그널)" if stop else
                          f"{short} {horizon}거래일 뒤 오를 확률 {up:.0f}% (스톡시그널 AI 분석)")
 
+    w = warn_words(p.ticker)
+    if w:
+        st.markdown(f'<div class="warn">⚠️ <b>{" · ".join(w)}</b> 종목이에요. 한국거래소가 위험하다고 알린 종목이라 '
+                    '값이 크게 흔들리거나 상장폐지될 수 있어요. 특히 조심하세요.</div>', unsafe_allow_html=True)
+
     if stop:
         halted_view(p, close, news)
         return
@@ -551,6 +695,8 @@ def analysis_tab():
     fig.update_layout(height=280, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=10),
                       legend=dict(orientation="h", y=1.08, x=0), xaxis=dict(tickformat="%y.%m"))
     st.plotly_chart(fig, use_container_width=True)
+
+    vote_box(p.ticker, short, p.horizon, last, up)
 
     # ⑤ 자세한 내용은 탭으로 나눠서
     tab_n, tab_i, tab_t, tab_d = st.tabs(["📰 뉴스", "🏢 기업 정보", "🤖 AI 성적", "🧮 상세 분석"])
@@ -695,6 +841,9 @@ def analysis_tab():
         if edge < 2 or p.cv_auc < 0.53:
             st.warning("이 종목에서는 모델이 '항상 같은 방향을 찍는' 단순 기준선보다 뚜렷하게 낫지 않았어요.")
         st.caption("과거 데이터를 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀 본 결과(워크포워드 검증)예요.")
+        if set(cols_for(p.horizon)) <= set(p.latest_features.index):
+            indicator_table(p)
+            return
         st.markdown("**🧮 현재 지표와 모델이 중요하게 본 요인**")
         f = p.latest_features
         pct_keys = {"ret_1", "ret_5", "ret_20", "sma5_ratio", "sma20_ratio", "sma60_ratio", "vol_20", "dist_52w_high"}
@@ -704,6 +853,53 @@ def analysis_tab():
             val = f"{v * 100:+.2f}%" if k in pct_keys else f"{v:.2f}" if k != "macd_hist" else f"{v * 100:+.3f}%"
             rows.append({"지표": FEATURE_LABELS[k], "현재 값": val, "중요도": f"{p.importances[k] * 100:.1f}%"})
         st.dataframe(rows, hide_index=True, use_container_width=True)
+
+
+PCT_HINTS = ("mom_", "rs_", "_gap", "_slope", "roc_", "atr_pct", "rvol_", "bb_width", "macd_h", "ichi_")
+
+
+def _fmt(col, v):
+    if v != v:
+        return "-"
+    if col.startswith(PCT_HINTS) or any(h in col for h in PCT_HINTS):
+        return f"{v * 100:+.1f}%" if col != "macd_h" else f"{v * 100:+.2f}%"
+    if col in ("hhll", "double_pat", "hs_pat", "cross_5_20", "cross_20_60"):
+        return f"{v:+.0f}"
+    return f"{v:.2f}"
+
+
+def indicator_table(p):
+    """1·5·20일 뒤 예측: 지표 50가지 표 (순위·유형·내용·현재 값·AI 중요도)."""
+    st.markdown(f"**🧮 {p.horizon}일 뒤 AI 확률 분석 지표 50가지**")
+    imp = p.importances
+    try:  # 학습에 안 쓴 지표도 현재 값은 보여 주려고 전부 다시 계산
+        f = build_1d(p.history, load_index(market_index(p.ticker))).iloc[-1]
+    except Exception:
+        f = p.latest_features
+    stt = cached_status().get(_kr_code(p.ticker) or "", {})
+    fin = fundamentals_now(stt.get("fin"))
+    rows = []
+    table = indicators_for(p.horizon)
+    for rank, name, typ, desc, cols in table:
+        if cols:
+            val = " · ".join(_fmt(c, f.get(c, float("nan"))) for c in cols)
+            used = (f"✅ {imp.reindex(cols).sum() * 100:.1f}%" if set(cols) <= set(imp.index)
+                    else "➖ 이 기간엔 안 씀")
+        else:
+            val = fin.get(name, "자료 없음")
+            used = "참고만" if name in fin else "✖"
+        rows.append({"순위": rank, "지표": name, "유형": typ, "분석 내용": desc, "현재 값": val, "AI 반영(중요도)": used})
+    st.dataframe(rows, hide_index=True, use_container_width=True, height=420)
+    top = sorted(((imp.reindex(cols).sum(), name) for _, name, _, _, cols in table
+                  if cols and set(cols) <= set(imp.index)), reverse=True)[:3]
+    st.caption("✅ = AI가 학습한 지표(괄호 안은 이 종목에서 AI가 중요하게 본 정도) · 참고만 = 지금 값만 보여 줌 · "
+               "✖ = 자료가 없어 계산 못 함"
+               + (" · ➖ = 20일 뒤는 순위 상위 10개 지표만 학습해서 이번엔 안 씀(시험에서 이쪽이 더 정확했어요)"
+                  if p.horizon == 20 else "")
+               + ". 이 종목에서 AI가 가장 중요하게 본 것: "
+               + ", ".join(n for _, n in top) + ".")
+    st.caption("기본적 지표(실적·재무)는 과거 날짜별 기록을 무료로 구할 수 없어 학습에는 못 넣었어요. "
+               "업종 지수 자료가 없어 '시장·업종'은 시장(코스피·코스닥) 기준이고, 엘리어트 파동은 정해진 계산식이 없어 뺐어요.")
 
 
 def compare_tab():
@@ -793,12 +989,21 @@ if "_boot" not in st.session_state:
             except ValueError:
                 pass
     st.session_state.hold = hold[:30]
+    votes = []
+    for x in (qp.get("votes") or "").split(","):
+        parts = x.split("~")
+        if len(parts) == 7:
+            try:
+                votes.append((parts[0], parts[1], int(parts[2]), parts[3], float(parts[4]), parts[5], int(parts[6])))
+            except ValueError:
+                pass
+    st.session_state.votes = votes[:60]
     if qp.get("s"):  # 공유 링크로 들어왔을 때 그 종목을 바로 분석
         st.session_state.query = qp.get("s")
         st.session_state.horizon = int(qp.get("h")) if qp.get("h") in ("1", "5", "20") else 5
 
 # 다른 화면에 가 있어도 검색어·예측 기간이 지워지지 않게 보관
-for k in ("query", "horizon", "cmp_a", "cmp_b", "sc_prob", "sc_hit", "sc_mkt", "sc_price"):
+for k in ("query", "horizon", "cmp_a", "cmp_b", "sc_prob", "sc_hit", "sc_mkt", "sc_price", "sc_safe"):
     if k in st.session_state:
         st.session_state[k] = st.session_state[k]
 st.session_state.setdefault("horizon", 5)
@@ -806,6 +1011,7 @@ st.session_state.setdefault("page", PAGES[0])
 st.session_state.setdefault("page_last", PAGES[0])
 st.session_state.setdefault("sc_prob", 60)
 st.session_state.setdefault("sc_hit", 30)
+st.session_state.setdefault("sc_safe", True)
 
 
 def keep_horizon():
@@ -823,7 +1029,8 @@ def home_top(horizon):
     d = df[df["horizon"] == horizon].nlargest(5, "prob_up")
     prev = order_of(load_prev(), horizon, "up")
     for i, r in enumerate(d.itertuples(), 1):
-        st.button(f"{i}. {r.name} · **{r.prob_up * 100:.1f}%**{move_txt(prev, r.ticker, i, 5)}", key=f"rk_home_{i}",
+        st.button(f"{i}. {r.name} · **{r.prob_up * 100:.1f}%**{move_txt(prev, r.ticker, i, 5)}{warn_tag(r.ticker)}",
+                  key=f"rk_home_{i}",
                   on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
     st.button("전체 순위 보기 ›", key="all_rank", on_click=go_page, args=(P_PROB,))
     st.caption(f"{meta.get('date', '')} 장 마감 기준 · 뉴스 미반영 차트 AI 확률 · 누르면 자세한 분석으로 이동")
@@ -856,7 +1063,7 @@ def home_fav(horizon):
         if is_halted(code):
             label = f"{name} · ⛔ 거래정지"
         elif now is None:
-            label = f"{name} · 눌러서 분석"
+            label = f"{name} · 눌러서 분석{warn_tag(code)}"
         else:
             label = f"{name} · **{now * 100:.1f}%**"
             if diff is not None:
@@ -864,6 +1071,7 @@ def home_fav(horizon):
                 label += f" · 어제보다 {arrow}{abs(diff):.1f}%p" if arrow else " · 어제와 같음"
                 if abs(diff) >= 5:
                     label = "🔥 " + label
+            label += warn_tag(code)
         st.button(label, key=f"rk_fav_{i}", on_click=open_stock, args=(code, horizon), use_container_width=True)
     if prev is not None:
         st.caption("어제보다 확률이 많이 바뀐 종목이 위로 와요. 🔥 = 5%p 이상 변화")
@@ -925,6 +1133,7 @@ def screener_tab():
     c1, c2 = st.columns(2)
     market = c1.selectbox("시장", ["전체", "코스피", "코스닥"], key="sc_mkt")
     price = c2.selectbox("주가", ["전체", "1만 원 미만", "1~5만 원", "5~20만 원", "20만 원 이상"], key="sc_price")
+    safe = st.checkbox("⚠️ 관리종목·투자주의/경고/위험 종목 빼기", key="sc_safe")
 
     d = df[df["horizon"] == horizon].copy()
     pool = d[d["n"] >= 60]
@@ -937,13 +1146,16 @@ def screener_tab():
     lo, hi = {"1만 원 미만": (0, 1e4), "1~5만 원": (1e4, 5e4), "5~20만 원": (5e4, 2e5),
               "20만 원 이상": (2e5, float("inf"))}.get(price, (0, float("inf")))
     d = d[(d["close"] >= lo) & (d["close"] < hi)].sort_values("prob_up", ascending=False)
+    if safe:
+        d = d[[not warn_words(t) for t in d["ticker"]]]
 
     st.markdown(f"#### 🔎 조건에 맞는 종목 {len(d):,}개")
     if d.empty:
         st.info("조건에 맞는 종목이 없어요. 상승 확률을 낮추거나 적중률 조건을 풀어 보세요.")
     for i, r in enumerate(d.head(30).itertuples(), 1):
         hit = f" · 적중 {r.hit_rate * 100:.0f}%" if r.n >= 60 else ""
-        st.button(f"{i}. {r.name} ({r.market}) · 상승 **{r.prob_up * 100:.1f}%**{hit} · {r.close:,.0f}원",
+        st.button(f"{i}. {r.name} ({r.market}) · 상승 **{r.prob_up * 100:.1f}%**{hit} · {r.close:,.0f}원"
+                  f"{warn_tag(r.ticker)}",
                   key=f"rk_sc_{i}", on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
     if len(d) > 30:
         st.caption(f"상승 확률이 높은 순서로 30개만 보여 드려요. (나머지 {len(d) - 30:,}개는 조건을 좁혀 보세요)")
@@ -1030,6 +1242,7 @@ def holdings_tab():
                 body += " · ⛔ 거래정지"
             else:
                 body += f" · AI 상승 {prob * 100:.0f}%" if prob is not None else " · AI는 눌러서 확인"
+                body += warn_tag(ticker)
             st.button(body, key=f"rk_hold_{i}", on_click=open_stock, args=(code_of(ticker), horizon),
                       use_container_width=True)
         st.caption(f"🔺 수익 · 🔹 손실 · 수수료·세금은 빼지 않았어요. AI 확률은 매일 장 마감 후 계산한 {horizon}일 뒤 확률이에요"
@@ -1050,6 +1263,8 @@ def holdings_tab():
             st.selectbox("뺄 종목", [x[0] for x in hold], key="h_del",
                          format_func=lambda t: next(f"{x[1]} ({x[3]:.10g}주)" for x in hold if x[0] == t))
             st.button("빼기", key="h_del_btn", on_click=del_hold, use_container_width=True)
+    st.divider()
+    vote_section()
 
 
 def keep_page():
@@ -1061,6 +1276,8 @@ def keep_page():
 
 if st.session_state.page not in PAGES:  # 예전 메뉴 이름이 남아 있을 때
     st.session_state.page = st.session_state.page_last = PAGES[0]
+clock = cached_clock()
+st.markdown(f'<div class="clock"><b>{clock["label"]}</b> · {clock["note"]}</div>', unsafe_allow_html=True)
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
                             label_visibility="collapsed") or PAGES[0]
 if page == P_HOLD:
@@ -1095,5 +1312,7 @@ components.html("<script>window.top.postMessage(" + json.dumps(
     {"type": "stock-ai-store", "fav": _enc(st.session_state.get("fav", [])),
      "recent": _enc(st.session_state.get("recent", [])),
      "hold": ",".join(f"{t}~{n.replace(',', ' ').replace('~', ' ')}~{pr:.10g}~{q:.10g}"
-                      for t, n, pr, q in st.session_state.get("hold", []))}, ensure_ascii=False) + ", '*')</script>", height=0)
+                      for t, n, pr, q in st.session_state.get("hold", [])),
+     "votes": ",".join(f"{t}~{n.replace(',', ' ').replace('~', ' ')}~{h}~{d}~{pr:.10g}~{me}~{ai}"
+                       for t, n, h, d, pr, me, ai in st.session_state.get("votes", []))}, ensure_ascii=False) + ", '*')</script>", height=0)
 footer()

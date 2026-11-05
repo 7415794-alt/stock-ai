@@ -17,7 +17,7 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-from market import halted  # noqa: E402
+from market import halted, krx_status  # noqa: E402
 from predictor import load_history, load_krx, predict  # noqa: E402
 
 HORIZONS = (1, 5, 20)
@@ -40,8 +40,13 @@ def build_part(part: int, parts: int) -> None:
     krx = load_krx().sort_values("ticker").reset_index(drop=True)
     mine = krx[krx.index % parts == part]
     rows, start = [], time.time()
+    try:
+        status = krx_status()  # 거래정지·관리종목·투자주의 (한 번에)
+    except Exception:
+        status = {}
     for n, r in enumerate(mine.itertuples(), 1):
-        if halted(r.ticker):  # 거래정지 종목은 계산하지 않고 '거래정지'로만 표시
+        stt = status.get(r.ticker[:6]) or {"halted": halted(r.ticker), "managed": False, "alert": 0}
+        if stt["halted"]:  # 거래정지 종목은 계산하지 않고 '거래정지'로만 표시
             for h in HORIZONS:
                 rows.append({"ticker": r.ticker, "name": r.name, "market": r.market, "horizon": h, "halted": 1})
             continue
@@ -61,6 +66,7 @@ def build_part(part: int, parts: int) -> None:
                 "hit_rate": round(float(done["hit"].mean()), 4) if len(done) else None,
                 "hits": int(done["hit"].sum()), "n": len(done),
                 "close": float(df["Close"].iloc[-1]), "date": f"{df.index[-1]:%Y-%m-%d}", "halted": 0,
+                "managed": int(stt["managed"]), "alert": stt["alert"],
             })
         if n % 20 == 0:
             print(f"part {part}: {n}/{len(mine)} ({time.time() - start:.0f}s)", flush=True)
