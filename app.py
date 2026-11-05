@@ -8,14 +8,36 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from market import ai_mood, market_snapshot, stock_info
 from news import adjust, fetch_news, news_score
 from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
 
 st.set_page_config(page_title="스톡시그널", page_icon="📈", layout="centered")
 # 앱 껍데기(pwa/index.html)에 "화면이 다 떴어요" 신호를 보냄. 신호가 안 오면 껍데기가 자동으로 다시 불러옴
 components.html("<script>window.top.postMessage('stock-ai-ready', '*')</script>", height=0)
-st.title("📈 스톡시그널")
-st.markdown("**주식 AI 상승/하락 확률 분석**")
+st.markdown("""<style>
+/* 위쪽 빈 공간 줄이기 */
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 1.2rem; }
+.brand { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 4px; }
+.brand b { font-size: 22px; } .brand span { font-size: 13px; color: rgba(128,128,128,1); }
+/* 맨 위 메뉴: 한 줄로 두고 손가락으로 옆으로 넘기기 */
+.st-key-page [data-testid="stButtonGroup"], .st-key-page div[role="radiogroup"] {
+  flex-wrap: nowrap !important; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.st-key-page [data-testid="stButtonGroup"]::-webkit-scrollbar { display: none; }
+.st-key-page button { flex: 0 0 auto; white-space: nowrap; }
+/* 순위 버튼: 글자를 왼쪽 정렬하고 높이를 줄여서 표처럼 */
+div[class*="st-key-rk_"] button { justify-content: flex-start; text-align: left; min-height: 0;
+                                  padding: 6px 12px; margin-bottom: -6px; }
+div[class*="st-key-rk_"] button > div { justify-content: flex-start; width: 100%; }
+div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
+/* 기본 정보·지수 카드 (밝은/어두운 화면 모두 보이게 반투명 회색) */
+.kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 4px 0 8px; }
+.kv > div { background: rgba(128,128,128,.10); border-radius: 10px; padding: 8px 12px; }
+.kv small { display: block; font-size: 12px; color: rgba(128,128,128,1); }
+.kv b { font-size: 16px; } .kv i { font-style: normal; font-size: 13px; margin-left: 4px; }
+.upc { color: #e5484d; } .dnc { color: #3b82f6; }
+</style>
+<div class="brand"><b>📈 스톡시그널</b><span>주식 AI 확률 분석</span></div>""", unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -42,6 +64,22 @@ def cached_news(name, ticker):
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)  # 시가총액·PER 등은 1시간마다
+def cached_info(ticker):
+    return stock_info(ticker)
+
+
+@st.cache_data(ttl=300, show_spinner=False)  # 지수는 5분마다
+def cached_market():
+    return market_snapshot()
+
+
+def kv_grid(items):
+    """[(이름, 값, 작은 덧붙임)] → 2칸 카드."""
+    cells = "".join(f"<div><small>{k}</small><b>{v}</b>{x}</div>" for k, v, x in items)
+    st.markdown(f'<div class="kv">{cells}</div>', unsafe_allow_html=True)
+
+
 def md_escape(text):
     """뉴스 제목의 특수 문자가 굵은 글씨·수식 등으로 바뀌지 않게."""
     for ch in "\\`*_[]$~<>#":
@@ -56,11 +94,12 @@ def money(v, cur):
 def footer():
     """맨 아래 안내 (어느 화면에서 멈추든 항상 보이게)."""
     st.divider()
-    st.caption("⚠️ 본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
-               "뉴스 분석은 기사 제목의 단어만 보고 간단히 판단한 것이며, 주가는 실적·거시경제 등 "
-               "모델이 보지 못하는 요인에 크게 좌우됩니다. "
-               "투자 판단과 그 결과의 책임은 본인에게 있습니다.")
-    st.caption("📮 오류나 문의 사항은 [slakeknowledge@gmail.com](mailto:slakeknowledge@gmail.com) 으로 보내 주세요.")
+    with st.expander("ⓘ 꼭 알아 두세요"):
+        st.caption("본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
+                   "뉴스 분석은 기사 제목의 단어만 보고 간단히 판단한 것이며, 주가는 실적·거시경제 등 "
+                   "모델이 보지 못하는 요인에 크게 좌우됩니다. "
+                   "투자 판단과 그 결과의 책임은 본인에게 있습니다. 주가 정보는 무료 데이터라 약 20분 늦을 수 있습니다.")
+    st.caption("📮 오류·문의: [slakeknowledge@gmail.com](mailto:slakeknowledge@gmail.com)")
     # 앱(pwa/index.html)이 화면 맨 아래를 잘라내므로, 마지막 내용이 가려지지 않게 여백 추가
     st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
 
@@ -78,7 +117,7 @@ def load_rankings():
         return None, None
 
 
-PAGES = ["🔍 종목 분석", "🏆 AI 확률 순위", "🎯 적중률 순위"]
+PAGES = ["🔍 분석", "🏆 확률순위", "🎯 적중순위", "🌏 시장 분위기"]
 
 
 def open_stock(code, horizon):
@@ -90,12 +129,21 @@ def open_stock(code, horizon):
 
 
 # 순위 버튼: 글자를 왼쪽 정렬하고 높이를 줄여서 표처럼 보이게
-RANK_CSS = """<style>
-div[class*="st-key-rk_"] button { justify-content: flex-start; text-align: left; min-height: 0;
-                                  padding: 6px 12px; margin-bottom: -6px; }
-div[class*="st-key-rk_"] button > div { justify-content: flex-start; width: 100%; }
-div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
-</style>"""
+def go_page(name):
+    st.session_state.page = st.session_state.page_last = name
+
+
+def pick_recent():
+    """'최근 본 종목'을 누르면 그 종목을 다시 검색."""
+    v = st.session_state.recent_pick
+    if v:
+        st.session_state.query = v
+    st.session_state.recent_pick = None
+
+
+def remember(code, name):
+    r = [x for x in st.session_state.get("recent", []) if x[0] != code]
+    st.session_state.recent = [(code, name)] + r[:5]
 
 
 def rank_table(df, value_col, value_name, key, horizon):
@@ -114,7 +162,6 @@ def ranking_tab(kind):
     st.caption(f"📅 {meta.get('date', '')} 장 마감 기준 · 코스피·코스닥 {meta.get('stocks', 0):,}개 종목 · "
                f"{meta.get('built_at', '')} 계산")
     st.caption("👆 종목을 누르면 그 종목의 자세한 분석(뉴스 포함) 화면으로 이동해요.")
-    st.markdown(RANK_CSS, unsafe_allow_html=True)
     for tab, h in zip(st.tabs(["1거래일", "5거래일", "20거래일"]), (1, 5, 20)):
         with tab:
             d = df[df["horizon"] == h]
@@ -139,13 +186,17 @@ def ranking_tab(kind):
 
 
 def analysis_tab():
-    st.caption("코스피·코스닥 전 종목과 해외 주식을 검색할 수 있어요. "
-               "종목명 일부(삼성), 종목코드(005930), 티커(AAPL) 모두 됩니다.")
-    col_q, col_h = st.columns([3, 1])
-    query = col_q.text_input("종목 검색", placeholder="예: 삼성전자, NVDA, 005930", key="query")
-    horizon = col_h.selectbox("예측 기간", [1, 5, 20], key="horizon", format_func=lambda d: f"{d}거래일 후")
+    query = st.text_input("종목 검색", placeholder="🔍 삼성전자, 005930, NVDA", key="query",
+                          label_visibility="collapsed")
+    horizon = st.segmented_control("예측 기간", [1, 5, 20], key="horizon", on_change=keep_horizon,
+                                   format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed") or 5
+    recent = st.session_state.get("recent", [])
+    if recent:
+        st.pills("🕘 최근 본 종목", [c for c, _ in recent], key="recent_pick", on_change=pick_recent,
+                 format_func=lambda c: dict(recent).get(c, c))
 
     if not query:
+        home_top(horizon)
         return
 
     with st.spinner("종목 검색 중..."):
@@ -159,6 +210,7 @@ def analysis_tab():
     else:
         choice = candidates[0]
     ticker, name = choice
+    st.session_state.setdefault("recent", [])
 
     try:
         with st.spinner(f"{ticker} 10년치 데이터 학습 및 검증 중..."):
@@ -174,6 +226,8 @@ def analysis_tab():
         when_txt = f"{when:%Y-%m-%d %H:%M} 기준 (무료 데이터라 약 20분 늦을 수 있어요)"
     else:
         last, when_txt = p.history["Close"].iloc[-1], f"기준일 {p.history.index[-1]:%Y-%m-%d}"
+    remember(p.ticker[:6] if p.ticker.endswith((".KS", ".KQ")) else p.ticker,
+             p.name.split(" (")[0] if p.name != p.ticker else p.ticker)
     st.subheader(f"{p.name} ({p.ticker})")
     st.write(f"현재가 **{money(last, p.currency)}** · {when_txt}")
 
@@ -268,6 +322,15 @@ def analysis_tab():
     fig.update_layout(height=380, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
+    # ── 기본 정보 ───────────────────────────────────────
+    st.markdown("### 🏢 기본 정보")
+    info = cached_info(p.ticker)
+    if info:
+        kv_grid([(k, v, "") for k, v in info.items()])
+        st.caption("한국 종목은 네이버 증권, 해외 종목은 야후 파이낸스 자료예요. 적자 기업 등은 PER이 '-'로 나와요.")
+    else:
+        st.info("지금은 기본 정보를 불러오지 못했어요.")
+
     # ── 뉴스 ────────────────────────────────────────────
     st.markdown("### 📰 최신 뉴스와 AI 뉴스 분석")
     if news is None:
@@ -312,6 +375,68 @@ st.session_state.setdefault("page", PAGES[0])
 st.session_state.setdefault("page_last", PAGES[0])
 
 
+def keep_horizon():
+    if st.session_state.horizon is None:
+        st.session_state.horizon = st.session_state.get("horizon_last", 5)
+    st.session_state.horizon_last = st.session_state.horizon
+
+
+def home_top(horizon):
+    """검색 전 첫 화면: 오늘의 상승 확률 TOP 5."""
+    df, meta = load_rankings()
+    if df is None or df.empty:
+        return
+    st.markdown(f"#### 🔥 오늘의 상승 확률 TOP 5 · {horizon}일 뒤")
+    d = df[df["horizon"] == horizon].nlargest(5, "prob_up")
+    for i, r in enumerate(d.itertuples(), 1):
+        st.button(f"{i}. {r.name} · **{r.prob_up * 100:.1f}%**", key=f"rk_home_{i}",
+                  on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
+    st.button("전체 순위 보기 ›", key="all_rank", on_click=go_page, args=(PAGES[1],))
+    st.caption(f"{meta.get('date', '')} 장 마감 기준 · 뉴스 미반영 차트 AI 확률 · 누르면 자세한 분석으로 이동")
+
+
+def market_tab():
+    st.markdown("#### 🌏 주요 지수")
+    snap = cached_market()
+    if not snap:
+        st.info("지금은 지수를 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.")
+    else:
+        cells = []
+        for x in snap:
+            val = f"{x['last']:,.2f}원" if "환율" in x["name"] else f"{x['last']:,.2f}"
+            cls, arrow = ("upc", "▲") if x["chg"] > 0 else ("dnc", "▼") if x["chg"] < 0 else ("", "")
+            cells.append((x["name"], val, f'<i class="{cls}">{arrow}{x["chg"] * 100:+.2f}%</i>'))
+        kv_grid(cells)
+        st.caption("전 거래일 종가 대비 · 장중에는 약 20분 늦은 값 · 미국 지수는 한국 시간 새벽에 마감해요.")
+        fig = go.Figure()
+        for x in snap:
+            if x["name"] in ("코스피", "코스닥"):
+                h = x["hist"]
+                fig.add_scatter(x=h.index, y=(h / h.iloc[0] - 1) * 100, name=x["name"], mode="lines")
+        fig.update_layout(height=260, margin=dict(t=30, b=10, l=10, r=10), title="최근 3개월 등락률(%)",
+                          legend=dict(orientation="h", y=-0.15), xaxis=dict(tickformat="%m월"))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### 🤖 AI가 본 시장 분위기")
+    df, meta = load_rankings()
+    if df is None or df.empty:
+        st.info("AI 순위 데이터를 준비하고 있어요.")
+        return
+    mood = ai_mood(df)
+    cells = []
+    for h in (1, 5, 20):
+        share = (df[df["horizon"] == h]["prob_up"] >= 0.5).mean()
+        label = "상승 우세" if share >= 0.55 else "하락 우세" if share <= 0.45 else "팽팽"
+        cls = "upc" if share >= 0.55 else "dnc" if share <= 0.45 else ""
+        detail = " · ".join(f"{ko} {mood.loc[h, m] * 100:.0f}%"
+                            for m, ko in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")) if m in mood.columns)
+        cells.append((f"{h}일 뒤 오를 것 같은 종목", f"{share * 100:.0f}%",
+                      f'<i class="{cls}">{label}</i><small>{detail}</small>'))
+    kv_grid(cells)
+    st.caption(f"{meta.get('date', '')} 장 마감 기준 · 코스피·코스닥 {meta.get('stocks', 0):,}개 종목 중 "
+               "AI 상승 확률이 50% 이상인 종목의 비율이에요. 55% 이상이면 '상승 우세', 45% 이하면 '하락 우세'로 표시해요.")
+
+
 def keep_page():
     # 이미 선택된 버튼을 한 번 더 눌러 선택이 풀리면 원래 화면으로 되돌림
     if st.session_state.page is None:
@@ -319,12 +444,16 @@ def keep_page():
     st.session_state.page_last = st.session_state.page
 
 
+if st.session_state.page not in PAGES:  # 예전 메뉴 이름이 남아 있을 때
+    st.session_state.page = st.session_state.page_last = PAGES[0]
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
                             label_visibility="collapsed") or PAGES[0]
 if page == PAGES[1]:
     ranking_tab("prob")
 elif page == PAGES[2]:
     ranking_tab("hit")
+elif page == PAGES[3]:
+    market_tab()
 else:
     if st.session_state.pop("to_top", False):
         # 순위에서 종목을 눌러 넘어왔을 때 화면을 맨 위로 올림 (숫자는 매번 새로 실행되게 하는 표시)
