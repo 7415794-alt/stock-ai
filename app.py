@@ -286,12 +286,26 @@ def analysis_tab():
     # ③ 한 줄 요약 + 핵심 3가지
     direction = ("오를 가능성을 더 높게" if up >= 55 else "내릴 가능성을 더 높게" if up <= 45
                  else "오를지 내릴지 비슷하게")
-    trust_txt = ("과거 검증에서 단순 찍기보다 조금 나았어요." if trusted
-                 else "다만 이 종목은 과거 검증 성적이 단순 찍기와 비슷해서 참고만 하세요.")
-    st.markdown(f'<div class="sum">💡 AI는 이 종목이 {p.horizon}거래일 뒤 <b>{direction}</b> 보고 있어요. {trust_txt}</div>',
+    # 이 종목의 최근 적중률이 코스피·코스닥 전 종목(같은 예측 기간) 중 상위 몇 %인지
+    top, pool_n = None, 0
+    rank_df, _ = load_rankings()
+    if rank_df is not None and p.ticker.endswith((".KS", ".KQ")) and hit_rate == hit_rate:
+        pool = rank_df[(rank_df["horizon"] == p.horizon) & (rank_df["n"] >= 60)]["hit_rate"].dropna()
+        if len(pool):
+            top = max(1, round(((pool > hit_rate / 100).sum() + 1) / len(pool) * 100))
+            pool_n = len(pool)
+    if top is None:
+        hit_txt = f"최근 {len(done)}번 중 {hit_rate:.0f}%를 맞혔어요." if hit_rate == hit_rate else ""
+    elif top <= 30:
+        hit_txt = f"최근 적중률이 전체 종목 중 <b>상위 {top}%</b>로 좋은 편이에요."
+    elif top >= 70:
+        hit_txt = f"다만 최근 적중률이 전체 종목 중 <b>상위 {top}%</b>(하위권)라 참고만 하세요."
+    else:
+        hit_txt = f"최근 적중률은 전체 종목 중 상위 {top}%로 중간 정도예요."
+    st.markdown(f'<div class="sum">💡 AI는 이 종목이 {p.horizon}거래일 뒤 <b>{direction}</b> 보고 있어요. {hit_txt}</div>',
                 unsafe_allow_html=True)
-    kv3 = [("신뢰도", "보통" if trusted else "낮음", ""),
-           ("최근 적중률", f"{hit_rate:.0f}%" if hit_rate == hit_rate else "-", ""),
+    kv3 = [("최근 적중률", f"{hit_rate:.0f}%" if hit_rate == hit_rate else "-", ""),
+           ("적중률 순위", f"상위 {top}%" if top else "-", ""),
            ("뉴스", mood_short, "")]
     cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v, _ in kv3)
     st.markdown(f'<div class="kv kv3">{cells}</div>', unsafe_allow_html=True)
@@ -347,6 +361,9 @@ def analysis_tab():
         hits = int(done["hit"].sum())
         kv_grid([(f"최근 {len(done)}번 적중률", f"{hit_rate:.1f}%", f"<small>성공 {hits} · 실패 {len(done) - hits}</small>"),
                  ("'항상 상승' 찍기", f"{(done['ret'] > 0).mean() * 100:.1f}%", "<small>비교용 기준</small>")])
+        if top:
+            st.caption(f"🏅 적중률 순위: 같은 {p.horizon}거래일 예측 기준 코스피·코스닥 {pool_n:,}개 종목 중 상위 {top}% "
+                       "(매일 장 마감 후 계산한 순위 데이터와 비교)")
         rows = []
         for d, r in t.iloc[-11:-1][::-1].iterrows() if len(t) > 1 else []:
             if r["done"]:
