@@ -1,5 +1,6 @@
 """주식 AI 상승/하락 확률 분석 앱. 실행: streamlit run app.py"""
 import os
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,6 +8,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from news import adjust, fetch_news, news_score
 from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
 
 st.set_page_config(page_title="스톡시그널", page_icon="📈", layout="centered")
@@ -32,6 +34,21 @@ def cached_live(ticker):
     return live_price(ticker)
 
 
+@st.cache_data(ttl=600, show_spinner=False)  # 뉴스는 10분마다 새로
+def cached_news(name, ticker):
+    try:
+        return fetch_news(name, ticker)
+    except Exception:
+        return None
+
+
+def md_escape(text):
+    """뉴스 제목의 특수 문자가 굵은 글씨·수식 등으로 바뀌지 않게."""
+    for ch in "\\`*_[]$~<>#":
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def money(v, cur):
     return f"{v:,.0f}원" if cur == "KRW" else f"{v:,.2f} {cur}"
 
@@ -40,7 +57,8 @@ def footer():
     """맨 아래 안내 (어느 화면에서 멈추든 항상 보이게)."""
     st.divider()
     st.caption("⚠️ 본 앱은 과거 가격 패턴을 학습한 통계 모델의 참고용 결과이며 투자 권유가 아닙니다. "
-               "주가는 뉴스·실적·거시경제 등 모델이 보지 못하는 요인에 크게 좌우되며, "
+               "뉴스 분석은 기사 제목의 단어만 보고 간단히 판단한 것이며, 주가는 실적·거시경제 등 "
+               "모델이 보지 못하는 요인에 크게 좌우됩니다. "
                "투자 판단과 그 결과의 책임은 본인에게 있습니다.")
     st.caption("📮 오류나 문의 사항은 [slakeknowledge@gmail.com](mailto:slakeknowledge@gmail.com) 으로 보내 주세요.")
     # 앱(pwa/index.html)이 화면 맨 아래를 잘라내므로, 마지막 내용이 가려지지 않게 여백 추가
@@ -60,10 +78,32 @@ def load_rankings():
         return None, None
 
 
-def rank_table(df, value_col, value_name):
-    rows = [{"순위": i, "종목": f"{r.name} ({r.market})", value_name: f"{getattr(r, value_col) * 100:.1f}%",
-             "종가": f"{r.close:,.0f}원"} for i, r in enumerate(df.itertuples(), 1)]
-    st.dataframe(rows, hide_index=True, use_container_width=True)
+PAGES = ["🔍 종목 분석", "🏆 AI 확률 순위", "🎯 적중률 순위"]
+
+
+def open_stock(code, horizon):
+    """순위에서 종목을 누르면: 검색창에 종목코드를 넣고 '종목 분석' 화면으로 이동."""
+    st.session_state.query = code
+    st.session_state.horizon = horizon
+    st.session_state.page = st.session_state.page_last = PAGES[0]
+    st.session_state.to_top = True  # 분석 화면 맨 위부터 보이게
+
+
+# 순위 버튼: 글자를 왼쪽 정렬하고 높이를 줄여서 표처럼 보이게
+RANK_CSS = """<style>
+div[class*="st-key-rk_"] button { justify-content: flex-start; text-align: left; min-height: 0;
+                                  padding: 6px 12px; margin-bottom: -6px; }
+div[class*="st-key-rk_"] button > div { justify-content: flex-start; width: 100%; }
+div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
+</style>"""
+
+
+def rank_table(df, value_col, value_name, key, horizon):
+    for i, r in enumerate(df.itertuples(), 1):
+        label = (f"{i}. {r.name} ({r.market}) · {value_name} **{getattr(r, value_col) * 100:.1f}%** · "
+                 f"{r.close:,.0f}원")
+        st.button(label, key=f"rk_{key}_{i}", on_click=open_stock, args=(r.ticker[:6], horizon),
+                  use_container_width=True)
 
 
 def ranking_tab(kind):
@@ -73,24 +113,26 @@ def ranking_tab(kind):
         return
     st.caption(f"📅 {meta.get('date', '')} 장 마감 기준 · 코스피·코스닥 {meta.get('stocks', 0):,}개 종목 · "
                f"{meta.get('built_at', '')} 계산")
+    st.caption("👆 종목을 누르면 그 종목의 자세한 분석(뉴스 포함) 화면으로 이동해요.")
+    st.markdown(RANK_CSS, unsafe_allow_html=True)
     for tab, h in zip(st.tabs(["1거래일", "5거래일", "20거래일"]), (1, 5, 20)):
         with tab:
             d = df[df["horizon"] == h]
             if kind == "prob":
                 d = d.assign(prob_down=1 - d["prob_up"])
                 st.markdown(f"#### 📈 {h}거래일 뒤 상승 확률 TOP 20")
-                rank_table(d.nlargest(20, "prob_up"), "prob_up", "상승 확률")
+                rank_table(d.nlargest(20, "prob_up"), "prob_up", "상승 확률", f"up{h}", h)
                 st.markdown(f"#### 📉 {h}거래일 뒤 하락 확률 TOP 20")
-                rank_table(d.nlargest(20, "prob_down"), "prob_down", "하락 확률")
+                rank_table(d.nlargest(20, "prob_down"), "prob_down", "하락 확률", f"down{h}", h)
             else:
                 d = d[d["n"] >= 60].sort_values(["hit_rate", "hits"], ascending=False)
                 st.markdown(f"#### 🥇 적중률 상위 20 ({h}거래일 예측)")
-                rank_table(d.head(20), "hit_rate", "적중률")
+                rank_table(d.head(20), "hit_rate", "적중률", f"best{h}", h)
                 st.markdown(f"#### 🥶 적중률 하위 20 ({h}거래일 예측)")
-                rank_table(d.tail(20).iloc[::-1], "hit_rate", "적중률")
+                rank_table(d.tail(20).iloc[::-1], "hit_rate", "적중률", f"worst{h}", h)
     if kind == "prob":
         st.caption("AI가 계산한 확률이 높은 순서일 뿐, 실제로 오르거나 내린다는 보장은 없습니다. "
-                   "종목별 자세한 분석과 신뢰도는 '종목 분석' 탭에서 검색해 보세요.")
+                   "순위는 뉴스를 반영하지 않은 차트 AI 확률이에요. 종목을 누르면 뉴스까지 반영한 분석을 볼 수 있어요.")
     else:
         st.caption("적중률 = 최근 60번의 예측(상승 확률 50% 이상이면 상승, 미만이면 하락) 중 실제로 맞은 비율. "
                    "과거에 잘 맞았다고 앞으로도 잘 맞는다는 보장은 없습니다.")
@@ -100,8 +142,8 @@ def analysis_tab():
     st.caption("코스피·코스닥 전 종목과 해외 주식을 검색할 수 있어요. "
                "종목명 일부(삼성), 종목코드(005930), 티커(AAPL) 모두 됩니다.")
     col_q, col_h = st.columns([3, 1])
-    query = col_q.text_input("종목 검색", placeholder="예: 삼성전자, NVDA, 005930")
-    horizon = col_h.selectbox("예측 기간", [1, 5, 20], index=1, format_func=lambda d: f"{d}거래일 후")
+    query = col_q.text_input("종목 검색", placeholder="예: 삼성전자, NVDA, 005930", key="query")
+    horizon = col_h.selectbox("예측 기간", [1, 5, 20], key="horizon", format_func=lambda d: f"{d}거래일 후")
 
     if not query:
         return
@@ -135,11 +177,16 @@ def analysis_tab():
     st.subheader(f"{p.name} ({p.ticker})")
     st.write(f"현재가 **{money(last, p.currency)}** · {when_txt}")
 
-    up = p.prob_up * 100
+    news = cached_news(p.name, p.ticker)
+    score = news_score(news) if news else 0.0
+    final = adjust(p.prob_up, score)  # 차트 AI 확률 + 뉴스 분위기
+    up = final * 100
     c1, c2 = st.columns(2)
     c1.metric(f"{p.horizon}거래일 후 상승 확률", f"{up:.1f}%",
-              f"{(p.prob_up - p.base_rate) * 100:+.1f}%p vs 평소")
+              f"{(final - p.base_rate) * 100:+.1f}%p vs 평소")
     c2.metric(f"{p.horizon}거래일 후 하락 확률", f"{100 - up:.1f}%")
+    news_txt = f"📰 뉴스 {(final - p.prob_up) * 100:+.1f}%p" if news else "📰 뉴스 없음(반영 안 함)"
+    st.caption(f"📊 차트 AI {p.prob_up * 100:.1f}% · {news_txt} → 최종 {up:.1f}%")
 
     gauge = go.Figure(go.Indicator(
         mode="gauge+number", value=up, number={"suffix": "%"},
@@ -206,6 +253,7 @@ def analysis_tab():
     st.dataframe(rows, hide_index=True, use_container_width=True)
     st.caption(f"상승 확률 50% 이상이면 '상승', 미만이면 '하락' 예측으로 보고, 예측한 날 종가와 {p.horizon}거래일 뒤 종가를 "
                "비교해 판정합니다. 기간이 덜 지난 예측은 현재가로 중간 판정합니다. "
+               "적중 기록은 뉴스를 반영하지 않은 차트 AI 확률 기준입니다. "
                "과거 예측은 모두 그 날짜 이전 데이터로만 학습한 모델의 결과입니다. "
                "현재가는 1분마다 새로 받아오지만, 무료 데이터라 약 20분 늦을 수 있습니다.")
 
@@ -220,6 +268,29 @@ def analysis_tab():
     fig.update_layout(height=380, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
+    # ── 뉴스 ────────────────────────────────────────────
+    st.markdown("### 📰 최신 뉴스와 AI 뉴스 분석")
+    if news is None:
+        st.info("지금은 뉴스를 불러오지 못했어요. 잠시 뒤 다시 열어 주세요. (확률에는 뉴스를 반영하지 않았어요)")
+    elif not news:
+        st.info("최근 7일 동안 이 종목 관련 뉴스가 없어요. 확률에는 뉴스를 반영하지 않았어요.")
+    else:
+        mood = ("😀 긍정적" if score >= 0.3 else "🙂 조금 긍정적" if score >= 0.1 else
+                "😟 부정적" if score <= -0.3 else "😕 조금 부정적" if score <= -0.1 else "😐 중립")
+        good, bad = sum(x["sign"] > 0 for x in news), sum(x["sign"] < 0 for x in news)
+        st.markdown(f"#### 뉴스 분위기: {mood}")
+        st.markdown(f"🔴 호재 **{good}건** · 🔵 악재 **{bad}건** · ⚪ 중립 {len(news) - good - bad}건 → "
+                    f"상승 확률 **{(final - p.prob_up) * 100:+.1f}%p** 반영")
+        for x in news:
+            tag = "🔴 호재" if x["sign"] > 0 else "🔵 악재" if x["sign"] < 0 else "⚪ 중립"
+            why = " · ".join([f"+{w}" for w in x["pos"]] + [f"-{w}" for w in x["neg"]])
+            st.markdown(f"{tag} [{md_escape(x['title'])}]({x['link']})  \n"
+                        f":gray[{md_escape(x['source'])} · {x['when']:%m/%d %H:%M}"
+                        f"{' · 근거: ' + md_escape(why) if why else ''}]")
+        st.caption("구글 뉴스에서 최근 7일 기사를 최신순으로 가져와, 제목에 든 호재·악재 단어로 판단해요. "
+                   "최근 기사일수록 크게 반영하고, 확률은 최대 ±6%p까지만 바꿔요. "
+                   "단어만 보는 간단한 방식이라 기사 내용을 잘못 읽을 수 있고, 과거 검증은 차트 AI에만 해당돼요.")
+
     # ── 지표 ────────────────────────────────────────────
     st.markdown("### 🧮 현재 지표와 모델이 중요하게 본 요인")
     f = p.latest_features
@@ -232,11 +303,35 @@ def analysis_tab():
     st.dataframe(rows, hide_index=True, use_container_width=True)
 
 
-tab_a, tab_p, tab_h = st.tabs(["🔍 종목 분석", "🏆 AI 확률 순위", "🎯 적중률 순위"])
-with tab_p:
+# 다른 화면에 가 있어도 검색어·예측 기간이 지워지지 않게 보관
+for k in ("query", "horizon"):
+    if k in st.session_state:
+        st.session_state[k] = st.session_state[k]
+st.session_state.setdefault("horizon", 5)
+st.session_state.setdefault("page", PAGES[0])
+st.session_state.setdefault("page_last", PAGES[0])
+
+
+def keep_page():
+    # 이미 선택된 버튼을 한 번 더 눌러 선택이 풀리면 원래 화면으로 되돌림
+    if st.session_state.page is None:
+        st.session_state.page = st.session_state.page_last
+    st.session_state.page_last = st.session_state.page
+
+
+page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
+                            label_visibility="collapsed") or PAGES[0]
+if page == PAGES[1]:
     ranking_tab("prob")
-with tab_h:
+elif page == PAGES[2]:
     ranking_tab("hit")
-with tab_a:
+else:
+    if st.session_state.pop("to_top", False):
+        # 순위에서 종목을 눌러 넘어왔을 때 화면을 맨 위로 올림 (숫자는 매번 새로 실행되게 하는 표시)
+        components.html(f"""<script>/*{time.time()}*/
+          for (const q of ['[data-testid="stMain"]', '[data-testid="stAppViewContainer"]', 'section.main']) {{
+            const el = window.parent.document.querySelector(q); if (el) el.scrollTo(0, 0);
+          }}
+          window.parent.scrollTo(0, 0);</script>""", height=0)
     analysis_tab()
 footer()
