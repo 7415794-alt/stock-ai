@@ -24,12 +24,16 @@ def market_snapshot() -> list[dict]:
     return out
 
 
-def _naver_info(code: str) -> dict:
-    """네이버 증권 (한국 종목): 이미 '1,175조', '9.02배'처럼 보기 좋게 만들어진 값."""
+def _naver(code: str) -> dict:
     r = requests.get(f"https://m.stock.naver.com/api/stock/{code}/integration",
                      timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
-    vals = {x.get("code"): x.get("value") for x in r.json().get("totalInfos", [])}
+    return r.json()
+
+
+def _naver_info(raw: dict) -> dict:
+    """네이버 증권 (한국 종목): 이미 '1,175조', '9.02배'처럼 보기 좋게 만들어진 값."""
+    vals = {x.get("code"): x.get("value") for x in raw.get("totalInfos", [])}
     pick = [("marketValue", "시가총액"), ("per", "PER"), ("pbr", "PBR"), ("dividendYieldRatio", "배당수익률"),
             ("highPriceOf52Weeks", "52주 최고"), ("lowPriceOf52Weeks", "52주 최저"),
             ("foreignRate", "외국인 보유"), ("eps", "EPS")]
@@ -69,13 +73,61 @@ def _yahoo_info(ticker: str) -> dict:
     }
 
 
-def stock_info(ticker: str) -> dict | None:
+def _num(s) -> float:
     try:
-        if ticker.endswith((".KS", ".KQ")):
-            return _naver_info(ticker[:6])
-        return _yahoo_info(ticker)
+        return float(str(s).replace(",", "").replace("+", ""))
+    except ValueError:
+        return float("nan")
+
+
+def _flows(raw: dict) -> pd.DataFrame | None:
+    """최근 거래일별 외국인·기관·개인 순매수 수량 (한국 종목)."""
+    rows = [{"날짜": pd.to_datetime(x["bizdate"]), "외국인": _num(x.get("foreignerPureBuyQuant")),
+             "기관": _num(x.get("organPureBuyQuant")), "개인": _num(x.get("individualPureBuyQuant")),
+             "종가": _num(x.get("closePrice"))} for x in raw.get("dealTrendInfos") or [] if x.get("bizdate")]
+    return pd.DataFrame(rows).sort_values("날짜") if rows else None
+
+
+def _schedule(ticker: str, raw: dict | None) -> list[tuple[str, pd.Timestamp, str]]:
+    """실적 발표·배당 일정: [(이름, 날짜, 덧붙임)]."""
+    out = []
+    ir = (raw or {}).get("irScheduleInfo")
+    if ir and ir.get("irScheduleDate"):
+        out.append((f"📢 {ir.get('title') or '실적 발표'}", pd.Timestamp(ir["irScheduleDate"]), "회사 공지"))
+    try:
+        cal = yf.Ticker(ticker).calendar or {}
     except Exception:
-        return None
+        cal = {}
+    dates = cal.get("Earnings Date") or []
+    if dates and not out:
+        out.append(("📢 실적 발표", pd.Timestamp(dates[0]), "예상일"))
+    if cal.get("Ex-Dividend Date"):
+        out.append(("💰 배당락일", pd.Timestamp(cal["Ex-Dividend Date"]), "이 날 전에 갖고 있어야 배당"))
+    if cal.get("Dividend Date"):
+        out.append(("💵 배당 지급일", pd.Timestamp(cal["Dividend Date"]), ""))
+    return sorted(out, key=lambda x: x[1])
+
+
+def company(ticker: str) -> dict:
+    """기본 정보·외국인/기관 매매·일정을 한 번에 (실패한 항목은 None)."""
+    korean = ticker.endswith((".KS", ".KQ"))
+    raw = None
+    if korean:
+        try:
+            raw = _naver(ticker[:6])
+        except Exception:
+            raw = None
+    try:
+        info = _naver_info(raw) if korean else _yahoo_info(ticker)
+    except Exception:
+        info = None
+    if korean and raw is None:
+        info = None
+    return {"info": info, "flow": _flows(raw) if raw else None, "schedule": _schedule(ticker, raw)}
+
+
+def stock_info(ticker: str) -> dict | None:
+    return company(ticker)["info"]
 
 
 def ai_mood(rank: pd.DataFrame) -> pd.DataFrame:
