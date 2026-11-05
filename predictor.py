@@ -46,6 +46,7 @@ FEATURE_LABELS.update(MARKET_LABELS)
 USE_MARKET = False  # 시험 결과 정확도가 오르지 않아 꺼 둠
 USE_1D_SET = True  # 지표 50가지 표 사용 여부
 SET_HORIZONS = (1, 5, 20)  # 50가지 표로 예측하는 기간
+USE_POOL = True  # 한국 종목은 전 종목 통합 모델 사용 (pool.py)
 FEATURE_LABELS.update(D1_LABELS)
 _INDEX_CACHE: dict[str, tuple[float, pd.Series]] = {}
 
@@ -66,6 +67,7 @@ class Prediction:
     latest_features: pd.Series
     importances: pd.Series
     track: pd.DataFrame  # 날짜별 예측과 실제 결과 (적중 기록)
+    model: str = "stock"  # "pool" = 전 종목 통합 모델, "stock" = 이 종목만 따로 학습
 
 
 def _norm(s: str) -> str:
@@ -244,6 +246,15 @@ def predict(ticker: str, name: str = "", horizon: int = 5,
         df = load_history(ticker)
     if len(df) < 300:
         raise ValueError("과거 데이터가 너무 적어 분석할 수 없습니다 (최소 약 300거래일 필요).")
+
+    # 한국 종목: 매일 전 종목으로 학습해 둔 통합 모델을 씀 (없거나 실패하면 아래 종목별 학습)
+    if USE_POOL:
+        try:
+            import pool
+            if pool.available(ticker, horizon):
+                return pool.predict_pooled(ticker, name, horizon, df, load_index(market_index(ticker)))
+        except Exception:
+            pass
 
     if horizon in SET_HORIZONS and USE_1D_SET:  # 1·5·20일 뒤: 지표 50가지 표(indicators.py) 중 계산할 수 있는 기술적 지표 전부
         feats = build_1d(df, load_index(market_index(ticker)))

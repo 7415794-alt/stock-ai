@@ -1,8 +1,10 @@
 """코스피·코스닥 전 종목을 계산해서 순위용 파일을 만듦 (GitHub Actions에서 매일 자동 실행).
 
 사용법:
-  python rank_build.py part 0 16     # 전체를 16조각으로 나눈 것 중 0번 조각 계산 → parts/part-0.csv
-  python rank_build.py merge         # parts/*.csv를 합쳐 out/rankings.csv, out/meta.json 생성
+  python rank_build.py part 0 20     # 전체를 20조각으로 나눈 것 중 0번 조각: 주가를 받아 지표 계산
+                                     #   → parts/part-0.csv (종목 정보), parts/feat-0.parquet (날짜별 지표)
+  python rank_build.py merge         # 전 종목 지표를 모아 통합 모델 학습(pool.py) → out/pool/,
+                                     #   out/rankings.csv, out/meta.json 생성
 """
 from __future__ import annotations
 
@@ -17,8 +19,9 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+import pool  # noqa: E402
 from market import halted, krx_status  # noqa: E402
-from predictor import load_history, load_krx, predict  # noqa: E402
+from predictor import load_history, load_index, load_krx, market_index  # noqa: E402
 
 HORIZONS = (1, 5, 20)
 RECENT = 60  # 적중률은 앱과 똑같이 '최근 60번' 기준
@@ -39,7 +42,7 @@ def fetch(ticker: str, tries: int = 3) -> pd.DataFrame | None:
 def build_part(part: int, parts: int) -> None:
     krx = load_krx().sort_values("ticker").reset_index(drop=True)
     mine = krx[krx.index % parts == part]
-    rows, start = [], time.time()
+    rows, feats, start = [], [], time.time()
     try:
         status = krx_status()  # 거래정지·관리종목·투자주의 (한 번에)
     except Exception:
@@ -54,17 +57,14 @@ def build_part(part: int, parts: int) -> None:
         # 데이터가 1년 남짓 안 되거나, 최근 거래가 없는(거래정지 등) 종목은 뺌
         if df is None or len(df) < 300 or df.index[-1] < pd.Timestamp.now(tz=df.index.tz) - timedelta(days=10):
             continue
-        for h in HORIZONS:
-            try:
-                p = predict(r.ticker, r.name, h, df=df, currency="KRW")
-            except Exception:
-                continue
-            done = p.track[p.track["done"]].iloc[-RECENT:]
+        try:
+            feats.append(pool.stock_frame(r.ticker, df, load_index(market_index(r.ticker))))
+        except Exception as e:
+            print(f"skip {r.ticker}: {e}", flush=True)
+            continue
+        for h in HORIZONS:  # 확률·적중률은 merge에서 통합 모델로 채움
             rows.append({
                 "ticker": r.ticker, "name": r.name, "market": r.market, "horizon": h,
-                "prob_up": round(p.prob_up, 4),
-                "hit_rate": round(float(done["hit"].mean()), 4) if len(done) else None,
-                "hits": int(done["hit"].sum()), "n": len(done),
                 "close": float(df["Close"].iloc[-1]), "date": f"{df.index[-1]:%Y-%m-%d}", "halted": 0,
                 "managed": int(stt["managed"]), "alert": stt["alert"],
             })
@@ -72,14 +72,29 @@ def build_part(part: int, parts: int) -> None:
             print(f"part {part}: {n}/{len(mine)} ({time.time() - start:.0f}s)", flush=True)
     Path("parts").mkdir(exist_ok=True)
     pd.DataFrame(rows).to_csv(f"parts/part-{part}.csv", index=False, encoding="utf-8")
+    if feats:
+        pd.concat(feats, ignore_index=True).to_parquet(f"parts/feat-{part}.parquet", index=False)
     print(f"part {part} done: {len(rows)} rows, {time.time() - start:.0f}s")
 
 
 def merge() -> None:
     files = sorted(Path("parts").rglob("part-*.csv"))
     frames = [pd.read_csv(f, dtype={"ticker": str}) for f in files if f.stat().st_size > 1]
-    df = pd.concat(frames, ignore_index=True)
+    info = pd.concat(frames, ignore_index=True)
     Path("out").mkdir(exist_ok=True)
+
+    # 전 종목 통합 학습 → 오늘 확률·최근 적중률
+    feats = pd.concat([pd.read_parquet(f) for f in sorted(Path("parts").rglob("feat-*.parquet"))],
+                      ignore_index=True)
+    print(f"학습 데이터: {feats['ticker'].nunique()}종목, {len(feats):,}줄", flush=True)
+    res = pool.train(feats, "out/pool")
+    del feats
+    res = res[["ticker", "horizon", "prob_up", "hit_rate", "hits", "n_recent"]].rename(columns={"n_recent": "n"})
+    live = info[info["halted"] != 1].merge(res, on=["ticker", "horizon"], how="inner")
+    df = pd.concat([live, info[info["halted"] == 1]], ignore_index=True)
+    cols = ["ticker", "name", "market", "horizon", "prob_up", "hit_rate", "hits", "n", "close", "date",
+            "halted", "managed", "alert"]
+    df = df[[c for c in cols if c in df]]
     df.to_csv("out/rankings.csv", index=False, encoding="utf-8")
     kst = timezone(timedelta(hours=9))
     meta = {
@@ -87,6 +102,7 @@ def merge() -> None:
         "date": df["date"].mode().iloc[0] if len(df) else "",
         "stocks": int(df.loc[df["halted"] != 1, "ticker"].nunique()) if len(df) else 0,
         "halted": int(df.loc[df["halted"] == 1, "ticker"].nunique()) if len(df) else 0,
+        "model": "pool",
     }
     meta["prev_date"] = keep_prev(df, meta["date"])
     Path("out/meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")

@@ -69,7 +69,7 @@ div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
 .cmp { width: 100%; border-collapse: collapse; font-size: 14px; margin: 8px 0; }
 .cmp th, .cmp td { padding: 7px 4px; border-bottom: 1px solid rgba(128,128,128,.2); text-align: center; border-left: none; border-right: none; }
 .cmp td:first-child { text-align: left; font-size: 12px; color: rgba(128,128,128,1); width: 32%; }
-.cmp td.win { font-weight: 700; } .cmp small { color: rgba(128,128,128,1); }
+.cmp td.win { font-weight: 700; color: #e5484d; } .cmp td.lose { color: #3b82f6; } .cmp small { color: rgba(128,128,128,1); }
 /* 장 상태 · 위험 종목 경고 · AI vs 나 */
 .clock { font-size: 12px; color: rgba(128,128,128,1); margin: -2px 0 6px; } .clock b { color: inherit; font-weight: 600; }
 .warn { background: rgba(245,158,11,.15); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: -4px 0 10px; }
@@ -98,7 +98,7 @@ def cached_search(q):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_predict(ticker, name, horizon, version=5):
+def cached_predict(ticker, name, horizon, version=6):
     # predictor.py의 결과 모양을 바꾸면 version 숫자를 올려서, 예전에 저장된 결과를 쓰지 않게 함
     return predict(ticker, name, horizon)
 
@@ -636,7 +636,7 @@ def analysis_tab():
     ticker, name = choice
 
     try:
-        with st.spinner(f"{ticker} 10년치 데이터 학습 및 검증 중..."):
+        with st.spinner(f"{ticker} AI 분석 중..."):
             c = core(ticker, name, horizon)
     except Exception as e:
         st.error(f"분석 실패: {e}")
@@ -861,10 +861,15 @@ def analysis_tab():
         kv_grid([("과거 검증 정확도", f"{p.cv_accuracy * 100:.1f}%", ""),
                  ("단순 찍기 정확도", f"{p.cv_baseline_accuracy * 100:.1f}%", f"<small>차이 {edge:+.1f}%p</small>"),
                  ("AUC", f"{p.cv_auc:.3f}", "<small>0.5 = 동전 던지기</small>"),
-                 ("학습한 거래일", f"{p.n_samples:,}일", "")])
+                 (("학습한 데이터", f"{p.n_samples / 1e4:,.0f}만 일", "<small>전 종목</small>")
+                  if getattr(p, "model", "") == "pool" else ("학습한 거래일", f"{p.n_samples:,}일", ""))])
         if edge < 2 or p.cv_auc < 0.53:
             st.warning("이 종목에서는 모델이 '항상 같은 방향을 찍는' 단순 기준선보다 뚜렷하게 낫지 않았어요.")
-        st.caption("과거 데이터를 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀 본 결과(워크포워드 검증)예요.")
+        if getattr(p, "model", "") == "pool":
+            st.caption("🧠 한국 종목은 코스피·코스닥 전 종목의 10년치 데이터를 AI 하나가 함께 학습해요(매일 장 마감 후 다시 학습). "
+                       "위 성적은 최근 1년을 4구간으로 나눠, 각 구간 전까지의 데이터로만 학습한 AI가 이 종목을 맞혀 본 결과예요.")
+        else:
+            st.caption("과거 데이터를 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀 본 결과(워크포워드 검증)예요.")
         if set(cols_for(p.horizon)) <= set(p.latest_features.index):
             indicator_table(p)
             return
@@ -916,11 +921,12 @@ def indicator_table(p):
     st.dataframe(rows, hide_index=True, use_container_width=True, height=420)
     top = sorted(((imp.reindex(cols).sum(), name) for _, name, _, _, cols in table
                   if cols and set(cols) <= set(imp.index)), reverse=True)[:3]
-    st.caption("✅ = AI가 학습한 지표(괄호 안은 이 종목에서 AI가 중요하게 본 정도) · 참고만 = 지금 값만 보여 줌 · "
+    who = "전 종목에서" if getattr(p, "model", "") == "pool" else "이 종목에서"
+    st.caption(f"✅ = AI가 학습한 지표(괄호 안은 {who} AI가 중요하게 본 정도) · 참고만 = 지금 값만 보여 줌 · "
                "✖ = 자료가 없어 계산 못 함"
                + (" · ➖ = 20일 뒤는 순위 상위 10개 지표만 학습해서 이번엔 안 씀(시험에서 이쪽이 더 정확했어요)"
                   if p.horizon == 20 else "")
-               + ". 이 종목에서 AI가 가장 중요하게 본 것: "
+               + f". {who} AI가 가장 중요하게 본 것: "
                + ", ".join(n for _, n in top) + ".")
     st.caption("기본적 지표(실적·재무)는 과거 날짜별 기록을 무료로 구할 수 없어 학습에는 못 넣었어요. "
                "업종 지수 자료가 없어 '시장·업종'은 시장(코스피·코스닥) 기준이고, 엘리어트 파동은 정해진 계산식이 없어 뺐어요.")
@@ -977,10 +983,10 @@ def compare_tab():
     for label, va, vb, na, nb in rows:
         wa = wb = ""
         if na is not None and na == na and nb == nb and na != nb:
-            wa, wb = ("win", "") if na > nb else ("", "win")
+            wa, wb = ("win", "lose") if na > nb else ("lose", "win")
         html.append(f'<tr><td>{label}</td><td class="{wa}">{va}</td><td class="{wb}">{vb}</td></tr>')
     st.markdown(f'<table class="cmp">{"".join(html)}</table>', unsafe_allow_html=True)
-    st.caption("굵은 글씨 = 둘 중 더 나은 쪽. 확률은 뉴스까지 반영한 값이고, 과거 성적이 앞으로를 보장하지는 않아요.")
+    st.caption("🔴 빨간 굵은 글씨 = 둘 중 큰(더 나은) 쪽 · 🔵 파란 글씨 = 작은 쪽 (순위는 더 높은 쪽이 빨강). 확률은 뉴스까지 반영한 값이고, 과거 성적이 앞으로를 보장하지는 않아요.")
 
     fig = go.Figure()
     for x, color in zip(cs, ("#e5484d", "#3b82f6")):
@@ -1062,10 +1068,20 @@ def home_top(horizon):
     scorecard_box(compact=True)
 
 
+def set_fav_h():
+    """관심 종목 칸의 기간 버튼을 누르면 앱 전체 예측 기간도 같이 바꿈 (선택 해제는 무시)."""
+    if st.session_state.fav_h:
+        st.session_state.horizon = st.session_state.horizon_last = st.session_state.fav_h
+
+
 def home_fav(horizon):
     """첫 화면: 관심 종목과 오늘의 AI 확률 (한국 종목은 매일 계산한 순위 데이터에서)."""
     fav = st.session_state.get("fav", [])
     st.markdown(f"#### ⭐ 관심 종목 · {horizon}일 뒤")
+    # 관심 종목 칸 안의 예측 기간 버튼 (위쪽 기간 버튼과 같은 값을 씀)
+    st.session_state.fav_h = horizon
+    st.segmented_control("관심 종목 예측 기간", [1, 5, 20], key="fav_h", on_change=set_fav_h,
+                         format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed")
     if not fav:
         st.caption("아직 관심 종목이 없어요. 종목을 검색한 뒤 **☆ 관심 종목 추가**를 누르면 "
                    "여기(첫 화면)와 💼 내 종목 화면에 모여요.")
