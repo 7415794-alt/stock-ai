@@ -20,8 +20,17 @@ components.html("<script>window.top.postMessage('stock-ai-ready', '*')</script>"
 st.markdown("""<style>
 /* 위쪽 빈 공간 줄이기 */
 [data-testid="stMainBlockContainer"], .block-container { padding-top: 1.2rem; }
-.brand { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 4px; }
-.brand b { font-size: 22px; } .brand span { font-size: 13px; color: rgba(128,128,128,1); }
+/* 맨 위 '스톡시그널' 글자 = 홈 버튼 */
+.st-key-brand [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; align-items: center; margin-bottom: -8px; }
+.st-key-brand [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; }
+.st-key-brand button { border: none !important; background: transparent !important; padding: 0 !important;
+                       min-height: 0; box-shadow: none !important; }
+.st-key-brand button p { font-size: 22px !important; font-weight: 700; }
+.brand-sub { font-size: 13px; color: rgba(128,128,128,1); text-align: right; }
+/* 입력칸 옆 '확인' 버튼 (휴대폰에서도 한 줄) */
+div[class*="st-key-row_"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px; }
+div[class*="st-key-row_"] [data-testid="stColumn"]:first-child { min-width: 0 !important; flex: 1 1 auto !important; width: auto !important; }
+div[class*="st-key-row_"] [data-testid="stColumn"]:last-child { min-width: 0 !important; flex: 0 0 auto !important; width: auto !important; }
 /* 맨 위 메뉴: 한 줄로 두고 손가락으로 옆으로 넘기기 */
 .st-key-page [data-testid="stButtonGroup"], .st-key-page div[role="radiogroup"] {
   flex-wrap: nowrap !important; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
@@ -67,8 +76,20 @@ div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
 .st-key-vote [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px; }
 .st-key-vote [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
 .vs { background: rgba(128,128,128,.08); border-radius: 12px; padding: 10px 14px; font-size: 14px; margin: 4px 0 8px; }
-</style>
-<div class="brand"><b>📈 스톡시그널</b><span>주식 AI 확률 분석</span></div>""", unsafe_allow_html=True)
+</style>""", unsafe_allow_html=True)
+
+
+def go_home():
+    """맨 위 '스톡시그널'을 누르면: 검색어를 비우고 첫 화면(홈)으로."""
+    st.session_state.query = ""
+    st.session_state.page = st.session_state.page_last = "🔍 분석"
+    st.session_state.to_top = True
+
+
+with st.container(key="brand"):
+    _b1, _b2 = st.columns([3, 2], vertical_alignment="center")
+    _b1.button("📈 스톡시그널", key="home_btn", on_click=go_home)
+    _b2.markdown('<div class="brand-sub">주식 AI 확률 분석</div>', unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -585,8 +606,11 @@ def halted_view(p, close, news):
 
 
 def analysis_tab():
-    query = st.text_input("종목 검색", placeholder="🔍 삼성전자, 005930, NVDA", key="query",
-                          label_visibility="collapsed")
+    with st.container(key="row_query"):
+        c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
+        query = c1.text_input("종목 검색", placeholder="🔍 삼성전자, 005930, NVDA", key="query",
+                              label_visibility="collapsed")
+        c2.button("확인", key="query_ok")  # 누르면 입력한 글자로 바로 검색 (엔터와 같음)
     horizon = st.segmented_control("예측 기간", [1, 5, 20], key="horizon", on_change=keep_horizon,
                                    format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed") or 5
     recent = st.session_state.get("recent", [])
@@ -906,6 +930,7 @@ def compare_tab():
     st.caption("두 종목을 넣으면 AI 확률·적중률·기본 정보를 나란히 비교해요.")
     q1 = st.text_input("첫 번째 종목", key="cmp_a", placeholder="예: 삼성전자")
     q2 = st.text_input("두 번째 종목", key="cmp_b", placeholder="예: SK하이닉스")
+    st.button("확인 (비교하기)", key="cmp_ok", type="primary", use_container_width=True)
     horizon = st.segmented_control("예측 기간", [1, 5, 20], key="horizon", on_change=keep_horizon,
                                    format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed") or 5
     if not (q1 and q2):
@@ -1040,9 +1065,11 @@ def home_top(horizon):
 def home_fav(horizon):
     """첫 화면: 관심 종목과 오늘의 AI 확률 (한국 종목은 매일 계산한 순위 데이터에서)."""
     fav = st.session_state.get("fav", [])
-    if not fav:
-        return
     st.markdown(f"#### ⭐ 관심 종목 · {horizon}일 뒤")
+    if not fav:
+        st.caption("아직 관심 종목이 없어요. 종목을 검색한 뒤 **☆ 관심 종목 추가**를 누르면 "
+                   "여기(첫 화면)와 💼 내 종목 화면에 모여요.")
+        return
     df, _ = load_rankings()
     prev = load_prev()
 
@@ -1201,6 +1228,8 @@ def holdings_tab():
     st.caption("내가 산 종목을 넣어 두면 지금 수익률과 AI 의견을 한눈에 볼 수 있어요. (이 휴대폰에만 저장돼요)")
     horizon = st.session_state.get("horizon") or 5
     hold = st.session_state.get("hold", [])
+    home_fav(horizon)
+    st.markdown("#### 💼 내가 산 종목")
     df, _ = load_rankings()
     if hold:
         rows, tot_buy, tot_now, foreign = [], 0.0, 0.0, False
