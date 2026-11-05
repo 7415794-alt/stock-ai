@@ -150,6 +150,49 @@ def load_prev():
         return None
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_scorecard():
+    """매일 계산할 때 쌓는 'AI 성적표' (어제 TOP 20이 오늘 실제로 맞았는지)."""
+    try:
+        return pd.read_csv(RANK_URL + "scorecard.csv")
+    except Exception:
+        return None
+
+
+def scorecard_box(compact=False):
+    card = load_scorecard()
+    if card is None or card.empty:
+        return
+    r = card.iloc[-1]
+    d0, d1 = (pd.Timestamp(x).strftime("%m/%d") for x in (r["date"], r["eval_date"]))
+    up_pct, all_pct = r["up_hit"] / r["up_n"] * 100, r["all_up"] * 100
+    if compact:  # 첫 화면용 한 줄
+        st.markdown(f'<div class="follow">📋 어제 AI 성적표: 상승 TOP 20 중 <b class="upc">{int(r["up_hit"])}개</b> 실제 상승 '
+                    f'<small>(전체 종목은 {all_pct:.0f}% 상승 · {d0}→{d1})</small></div>', unsafe_allow_html=True)
+        return
+    st.markdown(f"#### 📋 어제 AI 성적표 <small>({d0} 예측 → {d1} 결과)</small>", unsafe_allow_html=True)
+    up_cls = "upc" if r["up_avg"] > 0 else "dnc"
+    cells = [("📈 상승 TOP 20", f'{int(r["up_hit"])}개 올랐어요',
+              f'<small>{up_pct:.0f}% 적중 · 평균 <span class="{up_cls}">{r["up_avg"] * 100:+.2f}%</span></small>'),
+             ("📉 하락 TOP 20", f'{int(r["down_hit"])}개 내렸어요',
+              f'<small>{r["down_hit"] / r["down_n"] * 100:.0f}% 적중 · 평균 {r["down_avg"] * 100:+.2f}%</small>'),
+             ("전체 종목 (비교용)", f"{all_pct:.0f}% 올랐어요", f'<small>평균 {r["all_avg"] * 100:+.2f}%</small>')]
+    if len(card) >= 2:
+        last = card.tail(20)
+        cells.append((f"최근 {len(last)}일 평균", f'{last["up_hit"].sum() / last["up_n"].sum() * 100:.0f}% 적중',
+                      f'<small>상승 TOP 20 기준 · 전체 {last["all_up"].mean() * 100:.0f}%</small>'))
+    kv_grid(cells)
+    if len(card) >= 2:
+        with st.expander("날짜별 성적 보기"):
+            st.dataframe([{"예측일": pd.Timestamp(x.date).strftime("%m/%d"),
+                           "상승 TOP 20": f"{int(x.up_hit)}/{int(x.up_n)}",
+                           "하락 TOP 20": f"{int(x.down_hit)}/{int(x.down_n)}",
+                           "전체 상승": f"{x.all_up * 100:.0f}%"} for x in card.iloc[::-1].head(30).itertuples()],
+                         hide_index=True, use_container_width=True)
+    st.caption("어제 '1거래일 뒤' 상승 확률 TOP 20 종목이 오늘 실제로 올랐는지(하락 TOP 20은 내렸는지) 매일 채점해요. "
+               "전체 종목 상승 비율보다 높아야 AI가 의미 있게 고른 거예요.")
+
+
 def order_of(df, h, kind):
     """같은 기준으로 줄 세운 종목 순서 → {종목코드: 등수}."""
     if df is None:
@@ -177,8 +220,8 @@ def move_txt(prev, ticker, rank, size):
     return f" · ▲{diff}" if diff > 0 else f" · ▼{-diff}" if diff < 0 else " · -"
 
 
-PAGES = ["🔍 분석", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
-P_ANALYZE, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
+PAGES = ["🔍 분석", "💼 내 종목", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
+P_ANALYZE, P_HOLD, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
 SHARE_URL = "https://7415794-alt.github.io/stock-ai-icon/"  # 공유 링크 = 앱 껍데기 주소
 
 
@@ -224,6 +267,8 @@ def ranking_tab(kind):
     st.caption(f"📅 {meta.get('date', '')} 장 마감 기준 · 코스피·코스닥 {meta.get('stocks', 0):,}개 종목 · "
                f"{meta.get('built_at', '')} 계산")
     st.caption("👆 종목을 누르면 그 종목의 자세한 분석(뉴스 포함) 화면으로 이동해요.")
+    if kind == "prob":
+        scorecard_box()
     prev_df = load_prev()
     if prev_df is not None and meta.get("prev_date"):
         st.caption(f"▲▼ = {meta['prev_date']} 순위보다 오르거나 내린 계단 수 · 🆕 = 새로 들어온 종목")
@@ -687,6 +732,15 @@ if "_boot" not in st.session_state:
     qp = st.query_params
     st.session_state.fav = _parse(qp.get("fav"))[:20]
     st.session_state.recent = _parse(qp.get("recent"))[:6]
+    hold = []
+    for x in (qp.get("hold") or "").split(","):
+        parts = x.split("~")
+        if len(parts) == 4:
+            try:
+                hold.append((parts[0], parts[1], float(parts[2]), float(parts[3])))
+            except ValueError:
+                pass
+    st.session_state.hold = hold[:30]
     if qp.get("s"):  # 공유 링크로 들어왔을 때 그 종목을 바로 분석
         st.session_state.query = qp.get("s")
         st.session_state.horizon = int(qp.get("h")) if qp.get("h") in ("1", "5", "20") else 5
@@ -721,6 +775,7 @@ def home_top(horizon):
                   on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
     st.button("전체 순위 보기 ›", key="all_rank", on_click=go_page, args=(P_PROB,))
     st.caption(f"{meta.get('date', '')} 장 마감 기준 · 뉴스 미반영 차트 AI 확률 · 누르면 자세한 분석으로 이동")
+    scorecard_box(compact=True)
 
 
 def home_fav(horizon):
@@ -730,13 +785,34 @@ def home_fav(horizon):
         return
     st.markdown(f"#### ⭐ 관심 종목 · {horizon}일 뒤")
     df, _ = load_rankings()
-    for i, (code, name) in enumerate(fav):
-        prob = None
-        if df is not None:
-            m = df[(df["ticker"].str[:6] == code) & (df["horizon"] == horizon)]
-            prob = m["prob_up"].iloc[0] if len(m) else None
-        label = f"{name} · **{prob * 100:.1f}%**" if prob is not None else f"{name} · 눌러서 분석"
+    prev = load_prev()
+
+    def prob_of(d, code):
+        if d is None:
+            return None
+        m = d[(d["ticker"].str[:6] == code) & (d["horizon"] == horizon)]
+        return float(m["prob_up"].iloc[0]) if len(m) else None
+
+    rows = []
+    for code, name in fav:
+        now, old = prob_of(df, code), prob_of(prev, code)
+        diff = (now - old) * 100 if now is not None and old is not None else None
+        rows.append((code, name, now, diff))
+    # 어제보다 확률이 크게 바뀐 종목을 위로
+    rows.sort(key=lambda x: -abs(x[3]) if x[3] is not None else 0)
+    for i, (code, name, now, diff) in enumerate(rows):
+        if now is None:
+            label = f"{name} · 눌러서 분석"
+        else:
+            label = f"{name} · **{now * 100:.1f}%**"
+            if diff is not None:
+                arrow = "▲" if diff > 0.05 else "▼" if diff < -0.05 else ""
+                label += f" · 어제보다 {arrow}{abs(diff):.1f}%p" if arrow else " · 어제와 같음"
+                if abs(diff) >= 5:
+                    label = "🔥 " + label
         st.button(label, key=f"rk_fav_{i}", on_click=open_stock, args=(code, horizon), use_container_width=True)
+    if prev is not None:
+        st.caption("어제보다 확률이 많이 바뀐 종목이 위로 와요. 🔥 = 5%p 이상 변화")
 
 
 def market_tab():
@@ -821,6 +897,104 @@ def screener_tab():
                "조건에 맞는다고 오른다는 보장은 없어요.")
 
 
+def unit(ticker):
+    """보유 종목 금액 표시용 통화."""
+    return "KRW" if ticker.endswith((".KS", ".KQ")) else "USD" if "." not in ticker else ""
+
+
+def add_hold():
+    q = (st.session_state.get("h_q") or "").strip()
+    price, qty = st.session_state.get("h_price"), st.session_state.get("h_qty")
+    if not q or not price or not qty:
+        st.session_state.h_msg = "종목, 산 가격, 수량을 모두 넣어 주세요."
+        return
+    cand = cached_search(q)
+    if not cand:
+        st.session_state.h_msg = f"'{q}' 검색 결과가 없어요."
+        return
+    ticker, name = cand[0]
+    short = name.split(" (")[0]
+    hold = st.session_state.get("hold", [])
+    old = next((x for x in hold if x[0] == ticker), None)
+    if old:  # 같은 종목을 더 샀으면 평균 단가로 합침
+        tq = old[3] + qty
+        price, qty = (old[2] * old[3] + price * qty) / tq, tq
+    st.session_state.hold = [(ticker, short, float(price), float(qty))] + [x for x in hold if x[0] != ticker]
+    st.session_state.hold = st.session_state.hold[:30]
+    st.session_state.h_msg = f"✅ {short}을(를) 추가했어요."
+    st.session_state.h_q = ""
+    st.session_state.h_price = st.session_state.h_qty = None
+
+
+def del_hold():
+    t = st.session_state.get("h_del")
+    st.session_state.hold = [x for x in st.session_state.get("hold", []) if x[0] != t]
+
+
+def holdings_tab():
+    st.caption("내가 산 종목을 넣어 두면 지금 수익률과 AI 의견을 한눈에 볼 수 있어요. (이 휴대폰에만 저장돼요)")
+    horizon = st.session_state.get("horizon") or 5
+    hold = st.session_state.get("hold", [])
+    df, _ = load_rankings()
+    if hold:
+        rows, tot_buy, tot_now, foreign = [], 0.0, 0.0, False
+        for ticker, name, price, qty in hold:
+            lp = cached_live(ticker)
+            now = lp[0] if lp else None
+            if now is None and df is not None:
+                m = df[df["ticker"] == ticker]
+                now = float(m["close"].iloc[0]) if len(m) else None
+            prob = None
+            if df is not None:
+                m = df[(df["ticker"] == ticker) & (df["horizon"] == horizon)]
+                prob = float(m["prob_up"].iloc[0]) if len(m) else None
+            rows.append((ticker, name, price, qty, now, prob))
+            if now is not None and unit(ticker) == "KRW":
+                tot_buy += price * qty
+                tot_now += now * qty
+            elif unit(ticker) != "KRW":
+                foreign = True
+        if tot_buy:
+            gain = tot_now - tot_buy
+            cls = "upc" if gain > 0 else "dnc" if gain < 0 else ""
+            kv_grid([("지금 가치", f"{tot_now:,.0f}원", f"<small>산 금액 {tot_buy:,.0f}원</small>"),
+                     ("수익", f'<span class="{cls}">{gain:+,.0f}원</span>',
+                      f'<small class="{cls}">{gain / tot_buy * 100:+.2f}%</small>')])
+            if foreign:
+                st.caption("해외 종목은 통화가 달라서 합계에서 빠져요.")
+        st.markdown(f"#### 💼 내 종목 {len(rows)}개 · AI {horizon}일 뒤")
+        for i, (ticker, name, price, qty, now, prob) in enumerate(rows):
+            cur = unit(ticker)
+            if now is None:
+                body = f"{name} · 현재가를 못 불러왔어요"
+            else:
+                r = now / price - 1
+                arrow = "🔺" if r > 0 else "🔹" if r < 0 else ""
+                body = (f"{name} · {arrow} **{r * 100:+.1f}%** ({(now - price) * qty:+,.{0 if cur == 'KRW' else 2}f}"
+                        f"{'원' if cur == 'KRW' else ' ' + cur}) · {money(now, cur)}")
+            body += f" · AI 상승 {prob * 100:.0f}%" if prob is not None else " · AI는 눌러서 확인"
+            st.button(body, key=f"rk_hold_{i}", on_click=open_stock, args=(code_of(ticker), horizon),
+                      use_container_width=True)
+        st.caption(f"🔺 수익 · 🔹 손실 · 수수료·세금은 빼지 않았어요. AI 확률은 매일 장 마감 후 계산한 {horizon}일 뒤 확률이에요"
+                   "(뉴스 미반영). 누르면 자세한 분석으로 이동해요.")
+    else:
+        st.info("아직 넣은 종목이 없어요. 아래에서 추가해 보세요.")
+
+    with st.expander("➕ 종목 추가", expanded=not hold):
+        st.text_input("종목 이름이나 코드", key="h_q", placeholder="예: 삼성전자")
+        c1, c2 = st.columns(2)
+        c1.number_input("산 가격 (1주)", min_value=0.0, value=None, step=100.0, key="h_price", placeholder="예: 70000")
+        c2.number_input("수량 (주)", min_value=0.0, value=None, step=1.0, key="h_qty", placeholder="예: 10")
+        st.button("추가하기", key="h_add", on_click=add_hold, type="primary", use_container_width=True)
+        if st.session_state.get("h_msg"):
+            st.caption(st.session_state.pop("h_msg"))
+    if hold:
+        with st.expander("🗑 종목 빼기"):
+            st.selectbox("뺄 종목", [x[0] for x in hold], key="h_del",
+                         format_func=lambda t: next(f"{x[1]} ({x[3]:.10g}주)" for x in hold if x[0] == t))
+            st.button("빼기", key="h_del_btn", on_click=del_hold, use_container_width=True)
+
+
 def keep_page():
     # 이미 선택된 버튼을 한 번 더 눌러 선택이 풀리면 원래 화면으로 되돌림
     if st.session_state.page is None:
@@ -832,7 +1006,9 @@ if st.session_state.page not in PAGES:  # 예전 메뉴 이름이 남아 있을 
     st.session_state.page = st.session_state.page_last = PAGES[0]
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
                             label_visibility="collapsed") or PAGES[0]
-if page == P_SCREEN:
+if page == P_HOLD:
+    holdings_tab()
+elif page == P_SCREEN:
     screener_tab()
 elif page == P_PROB:
     ranking_tab("prob")
@@ -860,5 +1036,7 @@ def _enc(items):
 # 관심 종목·최근 본 종목을 앱 껍데기(GitHub Pages)에 저장해 달라고 보냄 → 앱을 껐다 켜도 남음
 components.html("<script>window.top.postMessage(" + json.dumps(
     {"type": "stock-ai-store", "fav": _enc(st.session_state.get("fav", [])),
-     "recent": _enc(st.session_state.get("recent", []))}, ensure_ascii=False) + ", '*')</script>", height=0)
+     "recent": _enc(st.session_state.get("recent", [])),
+     "hold": ",".join(f"{t}~{n.replace(',', ' ').replace('~', ' ')}~{pr:.10g}~{q:.10g}"
+                      for t, n, pr, q in st.session_state.get("hold", []))}, ensure_ascii=False) + ", '*')</script>", height=0)
 footer()

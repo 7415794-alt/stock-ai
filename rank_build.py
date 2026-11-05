@@ -76,16 +76,17 @@ def merge() -> None:
         "date": df["date"].mode().iloc[0] if len(df) else "",
         "stocks": int(df["ticker"].nunique()) if len(df) else 0,
     }
-    meta["prev_date"] = keep_prev(meta["date"])
+    meta["prev_date"] = keep_prev(df, meta["date"])
     Path("out/meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     print(meta)
 
 
-def keep_prev(today: str) -> str:
+def keep_prev(df: pd.DataFrame, today: str) -> str:
     """순위 변동(▲3, 🆕)을 보여 주려고, 지금 data 브랜치에 있는 '어제' 순위를 prev_rankings.csv로 남김.
-    같은 날 다시 계산한 경우에는 원래 있던 어제 파일을 그대로 유지."""
+    같은 날 다시 계산한 경우에는 원래 있던 어제 파일을 그대로 유지. 어제 AI 성적표(scorecard.csv)도 함께 갱신."""
     import os
     base = f"https://raw.githubusercontent.com/{os.environ.get('GITHUB_REPOSITORY', '7415794-alt/stock-ai')}/data/"
+    prev, prev_date = None, ""
     for name in ("rankings.csv", "prev_rankings.csv"):
         try:
             old = pd.read_csv(base + name, dtype={"ticker": str})
@@ -94,8 +95,37 @@ def keep_prev(today: str) -> str:
         old_date = old["date"].mode().iloc[0] if len(old) else ""
         if old_date and old_date != today:
             old.to_csv("out/prev_rankings.csv", index=False, encoding="utf-8")
-            return str(old_date)
-    return ""
+            prev, prev_date = old, str(old_date)
+            break
+    try:
+        card = pd.read_csv(base + "scorecard.csv")
+    except Exception:
+        card = None
+    if prev is not None:
+        row = score_row(prev, df, prev_date, today)
+        if row:
+            new = pd.DataFrame([row])
+            card = new if card is None else pd.concat([card[card["date"] != prev_date], new], ignore_index=True)
+    if card is not None:
+        card.sort_values("date").tail(250).to_csv("out/scorecard.csv", index=False, encoding="utf-8")
+    return prev_date
+
+
+def score_row(prev: pd.DataFrame, df: pd.DataFrame, prev_date: str, today: str) -> dict | None:
+    """어제 낸 '1거래일 뒤' 예측 TOP 20이 오늘 실제로 맞았는지."""
+    p = prev[prev["horizon"] == 1][["ticker", "prob_up", "close"]]
+    now = df[df["horizon"] == 1][["ticker", "close"]].rename(columns={"close": "close_now"})
+    m = p.merge(now, on="ticker")
+    if len(m) < 100:
+        return None
+    m["ret"] = m["close_now"] / m["close"] - 1
+    up = m.nlargest(20, "prob_up")
+    down = m.nsmallest(20, "prob_up")
+    return {"date": prev_date, "eval_date": today,
+            "up_hit": int((up["ret"] > 0).sum()), "up_n": len(up), "up_avg": round(float(up["ret"].mean()), 5),
+            "down_hit": int((down["ret"] < 0).sum()), "down_n": len(down),
+            "down_avg": round(float(down["ret"].mean()), 5),
+            "all_up": round(float((m["ret"] > 0).mean()), 4), "all_avg": round(float(m["ret"].mean()), 5)}
 
 
 if __name__ == "__main__":
