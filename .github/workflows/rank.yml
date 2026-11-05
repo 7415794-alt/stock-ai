@@ -7,10 +7,15 @@ on:
   workflow_dispatch:         # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
   push:                      # 이 파일이나 계산 코드를 고쳐서 올리면 바로 한 번 실행
     branches: [main]
-    paths: [".github/workflows/rank.yml", "rank_build.py"]
+    paths: [".github/workflows/rank.yml", "rank_build.py", "pool.py", "indicators.py"]
 
 permissions:
   contents: write
+
+# 새로 올리면 이전에 돌던 계산은 멈추고 최신 것만 계산
+concurrency:
+  group: rank
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -33,10 +38,11 @@ jobs:
           name: part-${{ matrix.part }}
           path: parts/
 
-  merge:
+  merge:  # 전 종목 지표를 모아 통합 모델 학습 + 순위 파일 만들기
     needs: build
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,7 +60,7 @@ jobs:
           git init -q -b data
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add rankings.csv meta.json
+          git add rankings.csv meta.json pool
           [ -f prev_rankings.csv ] && git add prev_rankings.csv
           [ -f scorecard.csv ] && git add scorecard.csv
           git commit -q -m "순위 갱신 $(date -u +%F)"
