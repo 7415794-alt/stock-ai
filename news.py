@@ -75,6 +75,9 @@ def fetch_news(name: str, ticker: str, limit: int = 10) -> list[dict]:
             title = title[: -len(source) - 3]
         if report and report.search(title):
             continue
+        # 본문에만 이름이 잠깐 나오는 엉뚱한 기사는 뺌: 제목에 종목 이름이 있어야 함 (띄어쓰기 무시)
+        if korean and name.replace(" ", "") not in title.replace(" ", ""):
+            continue
         try:
             when = pd.Timestamp(parsedate_to_datetime(it.findtext("pubDate"))).tz_convert("Asia/Seoul")
         except Exception:
