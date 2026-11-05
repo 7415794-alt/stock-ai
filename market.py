@@ -48,9 +48,8 @@ def _naver_info(raw: dict) -> dict:
     return info
 
 
-def _yahoo_info(ticker: str) -> dict:
+def _yahoo_info(ticker: str, i: dict) -> dict:
     """야후 파이낸스 (해외 종목)."""
-    i = yf.Ticker(ticker).info or {}
     cur = i.get("currency") or ""
 
     def num(v, fmt):
@@ -108,6 +107,32 @@ def _schedule(ticker: str, raw: dict | None) -> list[tuple[str, pd.Timestamp, st
     return sorted(out, key=lambda x: x[1])
 
 
+def _opinion(score: float) -> str:
+    """투자의견 점수(5=강력 매수 … 1=매도)를 말로."""
+    for cut, word in ((4.5, "강력 매수"), (3.5, "매수"), (2.5, "중립"), (1.5, "매도")):
+        if score >= cut:
+            return word
+    return "강력 매도"
+
+
+def _consensus(raw: dict | None, yinfo: dict | None) -> dict | None:
+    """증권사 평균 목표주가·투자의견. 네이버(한국) 우선, 없으면 야후."""
+    c = (raw or {}).get("consensusInfo") or {}
+    target = _num(c.get("priceTargetMean"))
+    if target == target and target > 0:
+        score = _num(c.get("recommMean"))  # 네이버: 5 강력 매수 … 1 강력 매도
+        date = c.get("createDate") or ""
+        return {"target": target, "opinion": _opinion(score) if score == score else "-",
+                "n": None, "date": date.replace("-", ".")[:10], "src": "네이버 증권"}
+    i = yinfo or {}
+    target = i.get("targetMeanPrice")
+    if isinstance(target, (int, float)) and target > 0:
+        score = i.get("recommendationMean")  # 야후: 1 강력 매수 … 5 매도 → 뒤집기
+        return {"target": float(target), "opinion": _opinion(6 - score) if isinstance(score, (int, float)) else "-",
+                "n": i.get("numberOfAnalystOpinions"), "date": "", "src": "야후 파이낸스"}
+    return None
+
+
 def company(ticker: str) -> dict:
     """기본 정보·외국인/기관 매매·일정을 한 번에 (실패한 항목은 None)."""
     korean = ticker.endswith((".KS", ".KQ"))
@@ -117,13 +142,24 @@ def company(ticker: str) -> dict:
             raw = _naver(ticker[:6])
         except Exception:
             raw = None
+    yinfo = None
+    if not korean or not (raw or {}).get("consensusInfo"):  # 해외 종목 또는 네이버에 목표주가가 없을 때만
+        try:
+            yinfo = yf.Ticker(ticker).info or {}
+        except Exception:
+            yinfo = None
     try:
-        info = _naver_info(raw) if korean else _yahoo_info(ticker)
+        info = _naver_info(raw) if korean else _yahoo_info(ticker, yinfo or {})
     except Exception:
         info = None
     if korean and raw is None:
         info = None
-    return {"info": info, "flow": _flows(raw) if raw else None, "schedule": _schedule(ticker, raw)}
+    try:
+        cons = _consensus(raw, yinfo)
+    except Exception:
+        cons = None
+    return {"info": info, "flow": _flows(raw) if raw else None, "schedule": _schedule(ticker, raw),
+            "consensus": cons}
 
 
 def stock_info(ticker: str) -> dict | None:

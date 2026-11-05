@@ -76,8 +76,26 @@ def merge() -> None:
         "date": df["date"].mode().iloc[0] if len(df) else "",
         "stocks": int(df["ticker"].nunique()) if len(df) else 0,
     }
+    meta["prev_date"] = keep_prev(meta["date"])
     Path("out/meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     print(meta)
+
+
+def keep_prev(today: str) -> str:
+    """순위 변동(▲3, 🆕)을 보여 주려고, 지금 data 브랜치에 있는 '어제' 순위를 prev_rankings.csv로 남김.
+    같은 날 다시 계산한 경우에는 원래 있던 어제 파일을 그대로 유지."""
+    import os
+    base = f"https://raw.githubusercontent.com/{os.environ.get('GITHUB_REPOSITORY', '7415794-alt/stock-ai')}/data/"
+    for name in ("rankings.csv", "prev_rankings.csv"):
+        try:
+            old = pd.read_csv(base + name, dtype={"ticker": str})
+        except Exception:
+            continue
+        old_date = old["date"].mode().iloc[0] if len(old) else ""
+        if old_date and old_date != today:
+            old.to_csv("out/prev_rankings.csv", index=False, encoding="utf-8")
+            return str(old_date)
+    return ""
 
 
 if __name__ == "__main__":

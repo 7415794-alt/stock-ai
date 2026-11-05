@@ -141,7 +141,44 @@ def load_rankings():
         return None, None
 
 
-PAGES = ["🔍 분석", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
+@st.cache_data(ttl=600, show_spinner=False)
+def load_prev():
+    """어제 순위 (순위 변동 ▲▼🆕 표시용). 아직 없으면 None."""
+    try:
+        return pd.read_csv(RANK_URL + "prev_rankings.csv", dtype={"ticker": str})
+    except Exception:
+        return None
+
+
+def order_of(df, h, kind):
+    """같은 기준으로 줄 세운 종목 순서 → {종목코드: 등수}."""
+    if df is None:
+        return None
+    d = df[df["horizon"] == h]
+    if kind == "up":
+        d = d.sort_values("prob_up", ascending=False)
+    elif kind == "down":
+        d = d.sort_values("prob_up")
+    else:
+        d = d[d["n"] >= 60].sort_values(["hit_rate", "hits"], ascending=False)
+        if kind == "worst":
+            d = d.iloc[::-1]
+    return {t: i for i, t in enumerate(d["ticker"], 1)}
+
+
+def move_txt(prev, ticker, rank, size):
+    """어제보다 몇 계단 올랐는지: ▲3 / ▼2 / - / 🆕 (어제는 이 목록에 없었음)."""
+    if not prev:
+        return ""
+    old = prev.get(ticker)
+    if old is None or old > size:
+        return " · 🆕"
+    diff = old - rank
+    return f" · ▲{diff}" if diff > 0 else f" · ▼{-diff}" if diff < 0 else " · -"
+
+
+PAGES = ["🔍 분석", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
+P_ANALYZE, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
 SHARE_URL = "https://7415794-alt.github.io/stock-ai-icon/"  # 공유 링크 = 앱 껍데기 주소
 
 
@@ -171,10 +208,10 @@ def remember(code, name):
     st.session_state.recent = [(code, name)] + r[:5]
 
 
-def rank_table(df, value_col, value_name, key, horizon):
+def rank_table(df, value_col, value_name, key, horizon, prev=None):
     for i, r in enumerate(df.itertuples(), 1):
         label = (f"{i}. {r.name} ({r.market}) · {value_name} **{getattr(r, value_col) * 100:.1f}%** · "
-                 f"{r.close:,.0f}원")
+                 f"{r.close:,.0f}원{move_txt(prev, r.ticker, i, len(df))}")
         st.button(label, key=f"rk_{key}_{i}", on_click=open_stock, args=(r.ticker[:6], horizon),
                   use_container_width=True)
 
@@ -187,21 +224,27 @@ def ranking_tab(kind):
     st.caption(f"📅 {meta.get('date', '')} 장 마감 기준 · 코스피·코스닥 {meta.get('stocks', 0):,}개 종목 · "
                f"{meta.get('built_at', '')} 계산")
     st.caption("👆 종목을 누르면 그 종목의 자세한 분석(뉴스 포함) 화면으로 이동해요.")
+    prev_df = load_prev()
+    if prev_df is not None and meta.get("prev_date"):
+        st.caption(f"▲▼ = {meta['prev_date']} 순위보다 오르거나 내린 계단 수 · 🆕 = 새로 들어온 종목")
     for tab, h in zip(st.tabs(["1거래일", "5거래일", "20거래일"]), (1, 5, 20)):
         with tab:
             d = df[df["horizon"] == h]
             if kind == "prob":
                 d = d.assign(prob_down=1 - d["prob_up"])
                 st.markdown(f"#### 📈 {h}거래일 뒤 상승 확률 TOP 20")
-                rank_table(d.nlargest(20, "prob_up"), "prob_up", "상승 확률", f"up{h}", h)
+                rank_table(d.nlargest(20, "prob_up"), "prob_up", "상승 확률", f"up{h}", h,
+                           order_of(prev_df, h, "up"))
                 st.markdown(f"#### 📉 {h}거래일 뒤 하락 확률 TOP 20")
-                rank_table(d.nlargest(20, "prob_down"), "prob_down", "하락 확률", f"down{h}", h)
+                rank_table(d.nlargest(20, "prob_down"), "prob_down", "하락 확률", f"down{h}", h,
+                           order_of(prev_df, h, "down"))
             else:
                 d = d[d["n"] >= 60].sort_values(["hit_rate", "hits"], ascending=False)
                 st.markdown(f"#### 🥇 적중률 상위 20 ({h}거래일 예측)")
-                rank_table(d.head(20), "hit_rate", "적중률", f"best{h}", h)
+                rank_table(d.head(20), "hit_rate", "적중률", f"best{h}", h, order_of(prev_df, h, "best"))
                 st.markdown(f"#### 🥶 적중률 하위 20 ({h}거래일 예측)")
-                rank_table(d.tail(20).iloc[::-1], "hit_rate", "적중률", f"worst{h}", h)
+                rank_table(d.tail(20).iloc[::-1], "hit_rate", "적중률", f"worst{h}", h,
+                           order_of(prev_df, h, "worst"))
     if kind == "prob":
         st.caption("AI가 계산한 확률이 높은 순서일 뿐, 실제로 오르거나 내린다는 보장은 없습니다. "
                    "순위는 뉴스를 반영하지 않은 차트 AI 확률이에요. 종목을 누르면 뉴스까지 반영한 분석을 볼 수 있어요.")
@@ -450,6 +493,21 @@ def analysis_tab():
         else:
             st.info("지금은 기본 정보를 불러오지 못했어요.")
 
+        st.markdown("**🎯 증권사 목표주가**")
+        cons = comp.get("consensus")
+        if cons:
+            gap = cons["target"] / last - 1
+            g_cls = "upc" if gap > 0 else "dnc"
+            n_txt = f" · 증권사 {cons['n']}곳" if cons.get("n") else ""
+            kv_grid([("평균 목표주가", money(cons["target"], p.currency), f"<small>{cons['date'] or cons['src']}</small>"),
+                     ("현재가 대비", f'<span class="{g_cls}">{gap * 100:+.1f}%</span>',
+                      f"<small>{'더 오를 여지' if gap > 0 else '이미 목표 넘음'}</small>"),
+                     ("투자의견", cons["opinion"], f"<small>평균{n_txt}</small>")])
+            st.caption(f"증권사 애널리스트들이 낸 목표주가의 평균이에요({cons['src']}). 목표주가는 자주 바뀌고 "
+                       "틀리는 경우도 많으니 참고만 하세요.")
+        else:
+            st.caption("이 종목은 증권사 목표주가가 없어요. (작은 회사는 분석하는 증권사가 없는 경우가 많아요)")
+
         st.markdown("**🧑‍🤝‍🧑 외국인·기관 매매**")
         flow = comp["flow"]
         if flow is None or flow.empty:
@@ -592,6 +650,9 @@ def compare_tab():
          *[x["follow"]["strat_ret"] if x["follow"] else float("nan") for x in cs]),
         ("1년 주가 수익률", *[pct(x["year_ret"] * 100) for x in cs], cs[0]["year_ret"], cs[1]["year_ret"]),
     ]
+    gaps = [cp["consensus"]["target"] / x["last"] - 1 if cp.get("consensus") else float("nan")
+            for cp, x in zip(comps, cs)]
+    rows.append(("목표주가까지", *[pct(g * 100) for g in gaps], *gaps))
     for k in ("시가총액", "PER", "PBR", "배당수익률"):
         rows.append((k, *[(cp["info"] or {}).get(k, "-") for cp in comps], None, None))
     html = [f'<tr><th></th><th>{cs[0]["short"]}</th><th>{cs[1]["short"]}</th></tr>']
@@ -631,12 +692,14 @@ if "_boot" not in st.session_state:
         st.session_state.horizon = int(qp.get("h")) if qp.get("h") in ("1", "5", "20") else 5
 
 # 다른 화면에 가 있어도 검색어·예측 기간이 지워지지 않게 보관
-for k in ("query", "horizon", "cmp_a", "cmp_b"):
+for k in ("query", "horizon", "cmp_a", "cmp_b", "sc_prob", "sc_hit", "sc_mkt", "sc_price"):
     if k in st.session_state:
         st.session_state[k] = st.session_state[k]
 st.session_state.setdefault("horizon", 5)
 st.session_state.setdefault("page", PAGES[0])
 st.session_state.setdefault("page_last", PAGES[0])
+st.session_state.setdefault("sc_prob", 60)
+st.session_state.setdefault("sc_hit", 30)
 
 
 def keep_horizon():
@@ -652,10 +715,11 @@ def home_top(horizon):
         return
     st.markdown(f"#### 🔥 오늘의 상승 확률 TOP 5 · {horizon}일 뒤")
     d = df[df["horizon"] == horizon].nlargest(5, "prob_up")
+    prev = order_of(load_prev(), horizon, "up")
     for i, r in enumerate(d.itertuples(), 1):
-        st.button(f"{i}. {r.name} · **{r.prob_up * 100:.1f}%**", key=f"rk_home_{i}",
+        st.button(f"{i}. {r.name} · **{r.prob_up * 100:.1f}%**{move_txt(prev, r.ticker, i, 5)}", key=f"rk_home_{i}",
                   on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
-    st.button("전체 순위 보기 ›", key="all_rank", on_click=go_page, args=(PAGES[1],))
+    st.button("전체 순위 보기 ›", key="all_rank", on_click=go_page, args=(P_PROB,))
     st.caption(f"{meta.get('date', '')} 장 마감 기준 · 뉴스 미반영 차트 AI 확률 · 누르면 자세한 분석으로 이동")
 
 
@@ -717,6 +781,46 @@ def market_tab():
                "AI 상승 확률이 50% 이상인 종목의 비율이에요. 55% 이상이면 '상승 우세', 45% 이하면 '하락 우세'로 표시해요.")
 
 
+def screener_tab():
+    df, meta = load_rankings()
+    if df is None or df.empty:
+        st.info("순위 데이터를 준비하고 있어요. 매일 장 마감 뒤 오후 6시쯤 새로 계산됩니다.")
+        return
+    st.caption("원하는 조건을 고르면 코스피·코스닥 전 종목에서 맞는 종목을 찾아 드려요.")
+    horizon = st.segmented_control("예측 기간", [1, 5, 20], key="horizon", on_change=keep_horizon,
+                                   format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed") or 5
+    min_prob = st.slider("📈 상승 확률 몇 % 이상?", 50, 80, step=1, key="sc_prob", format="%d%%")
+    hit_top = st.select_slider("🎯 적중률 순위", [100, 50, 30, 10], key="sc_hit",
+                               format_func=lambda v: "상관없음" if v == 100 else f"상위 {v}% 안")
+    c1, c2 = st.columns(2)
+    market = c1.selectbox("시장", ["전체", "코스피", "코스닥"], key="sc_mkt")
+    price = c2.selectbox("주가", ["전체", "1만 원 미만", "1~5만 원", "5~20만 원", "20만 원 이상"], key="sc_price")
+
+    d = df[df["horizon"] == horizon].copy()
+    pool = d[d["n"] >= 60]
+    d["hit_top"] = pool["hit_rate"].rank(ascending=False, pct=True).reindex(d.index) * 100
+    d = d[d["prob_up"] >= min_prob / 100]
+    if hit_top < 100:
+        d = d[d["hit_top"] <= hit_top]
+    if market != "전체":
+        d = d[d["market"] == ("KOSPI" if market == "코스피" else "KOSDAQ")]
+    lo, hi = {"1만 원 미만": (0, 1e4), "1~5만 원": (1e4, 5e4), "5~20만 원": (5e4, 2e5),
+              "20만 원 이상": (2e5, float("inf"))}.get(price, (0, float("inf")))
+    d = d[(d["close"] >= lo) & (d["close"] < hi)].sort_values("prob_up", ascending=False)
+
+    st.markdown(f"#### 🔎 조건에 맞는 종목 {len(d):,}개")
+    if d.empty:
+        st.info("조건에 맞는 종목이 없어요. 상승 확률을 낮추거나 적중률 조건을 풀어 보세요.")
+    for i, r in enumerate(d.head(30).itertuples(), 1):
+        hit = f" · 적중 {r.hit_rate * 100:.0f}%" if r.n >= 60 else ""
+        st.button(f"{i}. {r.name} ({r.market}) · 상승 **{r.prob_up * 100:.1f}%**{hit} · {r.close:,.0f}원",
+                  key=f"rk_sc_{i}", on_click=open_stock, args=(r.ticker[:6], horizon), use_container_width=True)
+    if len(d) > 30:
+        st.caption(f"상승 확률이 높은 순서로 30개만 보여 드려요. (나머지 {len(d) - 30:,}개는 조건을 좁혀 보세요)")
+    st.caption(f"📅 {meta.get('date', '')} 장 마감 기준 · 뉴스 미반영 차트 AI 확률 · 적중률 순위는 최근 60번 예측 기준. "
+               "조건에 맞는다고 오른다는 보장은 없어요.")
+
+
 def keep_page():
     # 이미 선택된 버튼을 한 번 더 눌러 선택이 풀리면 원래 화면으로 되돌림
     if st.session_state.page is None:
@@ -728,13 +832,15 @@ if st.session_state.page not in PAGES:  # 예전 메뉴 이름이 남아 있을 
     st.session_state.page = st.session_state.page_last = PAGES[0]
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
                             label_visibility="collapsed") or PAGES[0]
-if page == PAGES[1]:
+if page == P_SCREEN:
+    screener_tab()
+elif page == P_PROB:
     ranking_tab("prob")
-elif page == PAGES[2]:
+elif page == P_HIT:
     ranking_tab("hit")
-elif page == PAGES[3]:
+elif page == P_CMP:
     compare_tab()
-elif page == PAGES[4]:
+elif page == P_MARKET:
     market_tab()
 else:
     if st.session_state.pop("to_top", False):
