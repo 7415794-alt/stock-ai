@@ -17,6 +17,7 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+from market import halted  # noqa: E402
 from predictor import load_history, load_krx, predict  # noqa: E402
 
 HORIZONS = (1, 5, 20)
@@ -40,6 +41,10 @@ def build_part(part: int, parts: int) -> None:
     mine = krx[krx.index % parts == part]
     rows, start = [], time.time()
     for n, r in enumerate(mine.itertuples(), 1):
+        if halted(r.ticker):  # 거래정지 종목은 계산하지 않고 '거래정지'로만 표시
+            for h in HORIZONS:
+                rows.append({"ticker": r.ticker, "name": r.name, "market": r.market, "horizon": h, "halted": 1})
+            continue
         df = fetch(r.ticker)
         # 데이터가 1년 남짓 안 되거나, 최근 거래가 없는(거래정지 등) 종목은 뺌
         if df is None or len(df) < 300 or df.index[-1] < pd.Timestamp.now(tz=df.index.tz) - timedelta(days=10):
@@ -55,7 +60,7 @@ def build_part(part: int, parts: int) -> None:
                 "prob_up": round(p.prob_up, 4),
                 "hit_rate": round(float(done["hit"].mean()), 4) if len(done) else None,
                 "hits": int(done["hit"].sum()), "n": len(done),
-                "close": float(df["Close"].iloc[-1]), "date": f"{df.index[-1]:%Y-%m-%d}",
+                "close": float(df["Close"].iloc[-1]), "date": f"{df.index[-1]:%Y-%m-%d}", "halted": 0,
             })
         if n % 20 == 0:
             print(f"part {part}: {n}/{len(mine)} ({time.time() - start:.0f}s)", flush=True)
@@ -74,7 +79,8 @@ def merge() -> None:
     meta = {
         "built_at": datetime.now(kst).strftime("%Y-%m-%d %H:%M"),
         "date": df["date"].mode().iloc[0] if len(df) else "",
-        "stocks": int(df["ticker"].nunique()) if len(df) else 0,
+        "stocks": int(df.loc[df["halted"] != 1, "ticker"].nunique()) if len(df) else 0,
+        "halted": int(df.loc[df["halted"] == 1, "ticker"].nunique()) if len(df) else 0,
     }
     meta["prev_date"] = keep_prev(df, meta["date"])
     Path("out/meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -113,9 +119,12 @@ def keep_prev(df: pd.DataFrame, today: str) -> str:
 
 def score_row(prev: pd.DataFrame, df: pd.DataFrame, prev_date: str, today: str) -> dict | None:
     """어제 낸 '1거래일 뒤' 예측 TOP 20이 오늘 실제로 맞았는지."""
-    p = prev[prev["horizon"] == 1][["ticker", "prob_up", "close"]]
-    now = df[df["horizon"] == 1][["ticker", "close"]].rename(columns={"close": "close_now"})
-    m = p.merge(now, on="ticker")
+    def live(d):  # 거래정지 종목은 채점에서 뺌
+        return d[d["halted"] != 1] if "halted" in d else d
+
+    p = live(prev)[lambda d: d["horizon"] == 1][["ticker", "prob_up", "close"]]
+    now = live(df)[lambda d: d["horizon"] == 1][["ticker", "close"]].rename(columns={"close": "close_now"})
+    m = p.merge(now, on="ticker").dropna(subset=["prob_up", "close", "close_now"])
     if len(m) < 100:
         return None
     m["ret"] = m["close_now"] / m["close"] - 1

@@ -24,6 +24,16 @@ def market_snapshot() -> list[dict]:
     return out
 
 
+def halted(code: str) -> bool:
+    """한국 종목이 지금 거래정지인지 (네이버 증권). 확인이 안 되면 False."""
+    try:
+        r = requests.get(f"https://m.stock.naver.com/api/stock/{code[:6]}/basic",
+                         timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        return (r.json().get("tradeStopType") or {}).get("name") == "HALTED"
+    except Exception:
+        return False
+
+
 def _naver(code: str) -> dict:
     r = requests.get(f"https://m.stock.naver.com/api/stock/{code}/integration",
                      timeout=10, headers={"User-Agent": "Mozilla/5.0"})

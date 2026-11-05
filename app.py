@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from market import ai_mood, company, market_snapshot
+from market import ai_mood, company, halted, market_snapshot
 from news import adjust, fetch_news, news_score
 from predictor import FEATURE_LABELS, live_price, predict, resolve_ticker
 
@@ -136,16 +136,32 @@ def load_rankings():
     try:
         df = pd.read_csv(RANK_URL + "rankings.csv", dtype={"ticker": str})
         meta = requests.get(RANK_URL + "meta.json", timeout=10).json()
+        if "halted" in df:  # 거래정지 종목은 순위·조건검색·시장 분위기 어디에도 안 나오게
+            meta["halted_codes"] = sorted(df.loc[df["halted"] == 1, "ticker"].str[:6].unique())
+            df = df[df["halted"] != 1].reset_index(drop=True)
         return df, meta
     except Exception:
         return None, None
+
+
+@st.cache_data(ttl=600, show_spinner=False)  # 거래정지 여부는 10분마다 다시 확인
+def cached_halted(code):
+    return halted(code)
+
+
+def is_halted(ticker):
+    """한국 종목만 확인 (해외 종목은 항상 False)."""
+    if ticker.endswith((".KS", ".KQ")) or (len(ticker) == 6 and ticker.isdigit()):
+        return cached_halted(ticker[:6])
+    return False
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_prev():
     """어제 순위 (순위 변동 ▲▼🆕 표시용). 아직 없으면 None."""
     try:
-        return pd.read_csv(RANK_URL + "prev_rankings.csv", dtype={"ticker": str})
+        prev = pd.read_csv(RANK_URL + "prev_rankings.csv", dtype={"ticker": str})
+        return prev[prev["halted"] != 1].reset_index(drop=True) if "halted" in prev else prev
     except Exception:
         return None
 
@@ -402,6 +418,33 @@ def share_button(code, horizon, title, text):
 </script>""", height=40)
 
 
+def halted_view(p, close, news):
+    """거래정지 종목: 확률은 보여 주지 않고 차트·뉴스·기업 정보만."""
+    st.markdown('<div class="hero"><div class="big">⛔ 거래정지</div>'
+                '<small>지금 거래가 멈춘 종목이라 AI 확률을 보여 드리지 않아요. 거래가 다시 시작되면 다시 계산해요.</small></div>',
+                unsafe_allow_html=True)
+    h = p.history.iloc[-252:]
+    fig = go.Figure(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"],
+                                   increasing_line_color="#e5484d", decreasing_line_color="#3b82f6", name="가격"))
+    fig.update_layout(height=280, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=10),
+                      xaxis=dict(tickformat="%y.%m"))
+    st.plotly_chart(fig, use_container_width=True)
+    tab_n, tab_i = st.tabs(["📰 뉴스", "🏢 기업 정보"])
+    with tab_n:
+        if not news:
+            st.info("최근 7일 동안 이 종목 관련 뉴스가 없어요.")
+        for n in (news or [])[:10]:
+            st.markdown(f"[{md_escape(n['title'])}]({n['link']})  \n"
+                        f":gray[{md_escape(n['source'])} · {n['when']:%m/%d %H:%M}]")
+        st.caption("거래정지 이유(공시·감사의견 등)는 뉴스나 전자공시(DART)에서 확인해 보세요.")
+    with tab_i:
+        comp = cached_company(p.ticker)
+        if comp["info"]:
+            kv_grid([(k, v, "") for k, v in comp["info"].items()])
+        else:
+            st.info("지금은 기본 정보를 불러오지 못했어요.")
+
+
 def analysis_tab():
     query = st.text_input("종목 검색", placeholder="🔍 삼성전자, 005930, NVDA", key="query",
                           label_visibility="collapsed")
@@ -439,6 +482,7 @@ def analysis_tab():
     hit_rate, top, mood, short = c["hit_rate"], c["top"], c["mood"], c["short"]
     code = code_of(p.ticker)
     remember(code, short)
+    stop = is_halted(p.ticker)
     up = final * 100
     edge = (p.cv_accuracy - p.cv_baseline_accuracy) * 100
 
@@ -456,7 +500,12 @@ def analysis_tab():
                   args=(code, short), use_container_width=True)
         with a2:
             share_button(code, horizon, f"스톡시그널 - {short} AI 분석",
+                         f"{short} 거래정지 중 (스톡시그널)" if stop else
                          f"{short} {horizon}거래일 뒤 오를 확률 {up:.0f}% (스톡시그널 AI 분석)")
+
+    if stop:
+        halted_view(p, close, news)
+        return
 
     # ② 확률 (가장 크게) + 막대
     big_cls = "upc" if up >= 50 else "dnc"
@@ -683,9 +732,12 @@ def compare_tab():
     def pct(v, digits=1):
         return f"{v:+.{digits}f}%" if v == v else "-"
 
+    stops = [is_halted(x["p"].ticker) for x in cs]
+
     rows = [  # (항목, A 값, B 값, 비교할 숫자 A, B, 큰 쪽이 좋은지)
         ("현재가", *[f"{money(x['last'], x['p'].currency)}<br><small>{pct(x['chg'] * 100, 2)}</small>" for x in cs], None, None),
-        (f"{horizon}일 뒤 오를 확률", *[f"{x['final'] * 100:.1f}%" for x in cs], cs[0]["final"], cs[1]["final"]),
+        (f"{horizon}일 뒤 오를 확률", *["⛔ 거래정지" if s else f"{x['final'] * 100:.1f}%" for x, s in zip(cs, stops)],
+         *[float("nan") if s else x["final"] for x, s in zip(cs, stops)]),
         ("최근 적중률", *[f"{x['hit_rate']:.0f}%" if x["hit_rate"] == x["hit_rate"] else "-" for x in cs],
          cs[0]["hit_rate"], cs[1]["hit_rate"]),
         ("적중률 순위", *[f"상위 {x['top']}%" if x["top"] else "-" for x in cs],
@@ -801,7 +853,9 @@ def home_fav(horizon):
     # 어제보다 확률이 크게 바뀐 종목을 위로
     rows.sort(key=lambda x: -abs(x[3]) if x[3] is not None else 0)
     for i, (code, name, now, diff) in enumerate(rows):
-        if now is None:
+        if is_halted(code):
+            label = f"{name} · ⛔ 거래정지"
+        elif now is None:
             label = f"{name} · 눌러서 분석"
         else:
             label = f"{name} · **{now * 100:.1f}%**"
@@ -972,7 +1026,10 @@ def holdings_tab():
                 arrow = "🔺" if r > 0 else "🔹" if r < 0 else ""
                 body = (f"{name} · {arrow} **{r * 100:+.1f}%** ({(now - price) * qty:+,.{0 if cur == 'KRW' else 2}f}"
                         f"{'원' if cur == 'KRW' else ' ' + cur}) · {money(now, cur)}")
-            body += f" · AI 상승 {prob * 100:.0f}%" if prob is not None else " · AI는 눌러서 확인"
+            if is_halted(ticker):
+                body += " · ⛔ 거래정지"
+            else:
+                body += f" · AI 상승 {prob * 100:.0f}%" if prob is not None else " · AI는 눌러서 확인"
             st.button(body, key=f"rk_hold_{i}", on_click=open_stock, args=(code_of(ticker), horizon),
                       use_container_width=True)
         st.caption(f"🔺 수익 · 🔹 손실 · 수수료·세금은 빼지 않았어요. AI 확률은 매일 장 마감 후 계산한 {horizon}일 뒤 확률이에요"
