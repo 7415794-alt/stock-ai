@@ -36,6 +36,20 @@ div[class*="st-key-rk_"] button p { font-size: 14px; text-align: left; }
 .kv small { display: block; font-size: 12px; color: rgba(128,128,128,1); }
 .kv b { font-size: 16px; } .kv i { font-style: normal; font-size: 13px; margin-left: 4px; }
 .upc { color: #e5484d; } .dnc { color: #3b82f6; }
+/* 분석 결과: 종목 줄 · 큰 확률 · 막대 · 요약 */
+.sh { display: flex; justify-content: space-between; align-items: flex-end; margin: 6px 0 10px; gap: 8px; }
+.sh b { font-size: 20px; } .sh span { display: block; font-size: 12px; color: rgba(128,128,128,1); }
+.pr { text-align: right; } .pr b { font-size: 18px; } .pr i { font-style: normal; margin-left: 6px; font-size: 14px; }
+.hero { background: rgba(128,128,128,.08); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; }
+.hero small { font-size: 13px; color: rgba(128,128,128,1); }
+.hero .big { font-size: 40px; font-weight: 700; line-height: 1.15; margin: 2px 0 10px; }
+.bar { position: relative; height: 10px; border-radius: 99px; background: #3b82f6; overflow: visible; }
+.bar .fill { height: 100%; border-radius: 99px 0 0 99px; background: #e5484d; }
+.bar .mark { position: absolute; top: -4px; width: 2px; height: 18px; background: rgba(128,128,128,1); }
+.bl { display: flex; justify-content: space-between; font-size: 12px; margin-top: 6px; color: rgba(128,128,128,1); }
+.src { font-size: 12px; color: rgba(128,128,128,1); margin-top: 8px; }
+.sum { background: rgba(255,193,7,.12); border-radius: 12px; padding: 10px 14px; font-size: 14px; line-height: 1.6; margin-bottom: 8px; }
+.kv3 { grid-template-columns: repeat(3, minmax(0, 1fr)); text-align: center; }
 </style>
 <div class="brand"><b>📈 스톡시그널</b><span>주식 AI 확률 분석</span></div>""", unsafe_allow_html=True)
 
@@ -221,149 +235,148 @@ def analysis_tab():
 
     # ── 결과 ───────────────────────────────────────────
     lp = cached_live(ticker)
+    close = p.history["Close"]
     if lp:
         last, when = lp
-        when_txt = f"{when:%Y-%m-%d %H:%M} 기준 (무료 데이터라 약 20분 늦을 수 있어요)"
+        before = close[close.index.date < pd.Timestamp(when).date()]
+        prev = before.iloc[-1] if len(before) else close.iloc[-1]
+        when_txt = f"{when:%m/%d %H:%M} 기준"
     else:
-        last, when_txt = p.history["Close"].iloc[-1], f"기준일 {p.history.index[-1]:%Y-%m-%d}"
+        last, prev, when_txt = close.iloc[-1], close.iloc[-2], f"{close.index[-1]:%m/%d} 종가"
+    chg = last / prev - 1
     remember(p.ticker[:6] if p.ticker.endswith((".KS", ".KQ")) else p.ticker,
              p.name.split(" (")[0] if p.name != p.ticker else p.ticker)
-    st.subheader(f"{p.name} ({p.ticker})")
-    st.write(f"현재가 **{money(last, p.currency)}** · {when_txt}")
 
     news = cached_news(p.name, p.ticker)
     score = news_score(news) if news else 0.0
     final = adjust(p.prob_up, score)  # 차트 AI 확률 + 뉴스 분위기
     up = final * 100
-    c1, c2 = st.columns(2)
-    c1.metric(f"{p.horizon}거래일 후 상승 확률", f"{up:.1f}%",
-              f"{(final - p.base_rate) * 100:+.1f}%p vs 평소")
-    c2.metric(f"{p.horizon}거래일 후 하락 확률", f"{100 - up:.1f}%")
-    news_txt = f"📰 뉴스 {(final - p.prob_up) * 100:+.1f}%p" if news else "📰 뉴스 없음(반영 안 함)"
-    st.caption(f"📊 차트 AI {p.prob_up * 100:.1f}% · {news_txt} → 최종 {up:.1f}%")
-
-    gauge = go.Figure(go.Indicator(
-        mode="gauge+number", value=up, number={"suffix": "%"},
-        title={"text": "상승 확률"},
-        gauge={
-            "axis": {"range": [0, 100]},
-            "bar": {"color": "#d62728" if up >= 50 else "#1f77b4"},
-            "steps": [{"range": [0, 45], "color": "#e3eefa"},
-                      {"range": [45, 55], "color": "#f0f0f0"},
-                      {"range": [55, 100], "color": "#fbe5e5"}],
-            "threshold": {"line": {"color": "black", "width": 2}, "value": p.base_rate * 100},
-        },
-    ))
-    gauge.update_layout(height=260, margin=dict(t=50, b=10, l=30, r=30))
-    st.plotly_chart(gauge, use_container_width=True)
-    st.caption(f"검은 선 = 이 종목이 과거 {p.horizon}거래일 동안 오른 비율({p.base_rate * 100:.1f}%). "
-               "이 선에서 멀수록 모델이 평소와 다르게 보고 있다는 뜻입니다.")
-
-    # ── 신뢰도 ──────────────────────────────────────────
-    st.markdown("### 🔍 이 예측을 얼마나 믿을 수 있나요?")
     edge = (p.cv_accuracy - p.cv_baseline_accuracy) * 100
-    m1, m2, m3 = st.columns(3)
-    m1.metric("과거 검증 정확도", f"{p.cv_accuracy * 100:.1f}%")
-    m2.metric("단순 기준선 정확도", f"{p.cv_baseline_accuracy * 100:.1f}%", f"{edge:+.1f}%p", delta_color="off")
-    m3.metric("AUC", f"{p.cv_auc:.3f}")
-    if edge < 2 or p.cv_auc < 0.53:
-        st.warning("⚠️ 이 종목에서는 모델이 '항상 같은 방향을 찍는' 단순 기준선보다 뚜렷하게 낫지 않았습니다. "
-                   "확률 수치를 참고 정도로만 보세요.")
-    else:
-        st.info("과거 워크포워드 검증에서 기준선보다 약간 나은 성과를 보였습니다. 그래도 미래를 보장하지는 않습니다.")
-    st.caption(f"검증 방식: {p.n_samples:,}개 거래일을 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀본 결과 "
-               "(워크포워드). AUC 0.5 = 동전 던지기 수준.")
+    trusted = edge >= 2 and p.cv_auc >= 0.53
 
-    # ── 적중 기록 ───────────────────────────────────────
-    st.markdown("### 🎯 AI 적중 기록")
     t = p.track.copy()
     # 아직 기간이 안 끝난 예측은 방금 받은 현재가로 다시 판정
     t.loc[~t["done"], "ret"] = last / t.loc[~t["done"], "start"] - 1
     t["hit"] = (t["prob_up"] >= 0.5) == (t["ret"] > 0)
     done = t[t["done"]].iloc[-60:]
-    live = t[~t["done"]].iloc[:-1]  # 최신 날짜(방금 낸 예측)는 제외
-    hits = int(done["hit"].sum())
-    a1, a2, a3 = st.columns(3)
-    a1.metric(f"최근 {len(done)}번 적중률", f"{done['hit'].mean() * 100:.1f}%",
-              f"성공 {hits} · 실패 {len(done) - hits}", delta_color="off")
-    a2.metric("'항상 상승' 찍기", f"{(done['ret'] > 0).mean() * 100:.1f}%")
-    if len(live):
-        a3.metric("진행 중 예측", f"{int(live['hit'].sum())}/{len(live)} 맞는 중")
+    hit_rate = done["hit"].mean() * 100 if len(done) else float("nan")
 
-    latest_date = t.index[-1]
-    rows = []
-    for d, r in t.iloc[-20:][::-1].iterrows():
-        if d == latest_date:
-            result, ret, verdict = "결과 대기", "-", "🆕 최신 예측"
-        elif r["done"]:
-            result, ret = f"{r['end_date']:%m/%d} 확정", f"{r['ret'] * 100:+.2f}%"
-            verdict = "✅ 성공" if r["hit"] else "❌ 실패"
-        else:
-            result, ret = "진행 중(현재가)", f"{r['ret'] * 100:+.2f}%"
-            verdict = "⏳ 맞는 중" if r["hit"] else "⏳ 틀리는 중"
-        rows.append({"예측한 날": f"{d:%m/%d}", "AI 상승 확률": f"{r['prob_up'] * 100:.0f}%",
-                     "AI 예측": "📈 상승" if r["prob_up"] >= 0.5 else "📉 하락",
-                     "결과": result, "실제 수익률": ret, "판정": verdict})
-    st.dataframe(rows, hide_index=True, use_container_width=True)
-    st.caption(f"상승 확률 50% 이상이면 '상승', 미만이면 '하락' 예측으로 보고, 예측한 날 종가와 {p.horizon}거래일 뒤 종가를 "
-               "비교해 판정합니다. 기간이 덜 지난 예측은 현재가로 중간 판정합니다. "
-               "적중 기록은 뉴스를 반영하지 않은 차트 AI 확률 기준입니다. "
-               "과거 예측은 모두 그 날짜 이전 데이터로만 학습한 모델의 결과입니다. "
-               "현재가는 1분마다 새로 받아오지만, 무료 데이터라 약 20분 늦을 수 있습니다.")
-
-    # ── 차트 ────────────────────────────────────────────
-    st.markdown("### 📊 최근 1년 주가")
-    h = p.history.iloc[-252:]
-    fig = go.Figure(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"],
-                                   increasing_line_color="#d62728", decreasing_line_color="#1f77b4", name="가격"))
-    for n, color in ((20, "orange"), (60, "green")):
-        fig.add_scatter(x=h.index, y=p.history["Close"].rolling(n).mean().iloc[-252:],
-                        line=dict(width=1, color=color), name=f"{n}일선")
-    fig.update_layout(height=380, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── 기본 정보 ───────────────────────────────────────
-    st.markdown("### 🏢 기본 정보")
-    info = cached_info(p.ticker)
-    if info:
-        kv_grid([(k, v, "") for k, v in info.items()])
-        st.caption("한국 종목은 네이버 증권, 해외 종목은 야후 파이낸스 자료예요. 적자 기업 등은 PER이 '-'로 나와요.")
-    else:
-        st.info("지금은 기본 정보를 불러오지 못했어요.")
-
-    # ── 뉴스 ────────────────────────────────────────────
-    st.markdown("### 📰 최신 뉴스와 AI 뉴스 분석")
-    if news is None:
-        st.info("지금은 뉴스를 불러오지 못했어요. 잠시 뒤 다시 열어 주세요. (확률에는 뉴스를 반영하지 않았어요)")
-    elif not news:
-        st.info("최근 7일 동안 이 종목 관련 뉴스가 없어요. 확률에는 뉴스를 반영하지 않았어요.")
+    if not news:
+        mood, mood_short = "뉴스 없음", "없음"
     else:
         mood = ("😀 긍정적" if score >= 0.3 else "🙂 조금 긍정적" if score >= 0.1 else
                 "😟 부정적" if score <= -0.3 else "😕 조금 부정적" if score <= -0.1 else "😐 중립")
-        good, bad = sum(x["sign"] > 0 for x in news), sum(x["sign"] < 0 for x in news)
-        st.markdown(f"#### 뉴스 분위기: {mood}")
-        st.markdown(f"🔴 호재 **{good}건** · 🔵 악재 **{bad}건** · ⚪ 중립 {len(news) - good - bad}건 → "
-                    f"상승 확률 **{(final - p.prob_up) * 100:+.1f}%p** 반영")
-        for x in news:
-            tag = "🔴 호재" if x["sign"] > 0 else "🔵 악재" if x["sign"] < 0 else "⚪ 중립"
-            why = " · ".join([f"+{w}" for w in x["pos"]] + [f"-{w}" for w in x["neg"]])
-            st.markdown(f"{tag} [{md_escape(x['title'])}]({x['link']})  \n"
-                        f":gray[{md_escape(x['source'])} · {x['when']:%m/%d %H:%M}"
-                        f"{' · 근거: ' + md_escape(why) if why else ''}]")
-        st.caption("구글 뉴스에서 최근 7일 기사를 최신순으로 가져와, 제목에 든 호재·악재 단어로 판단해요. "
-                   "최근 기사일수록 크게 반영하고, 확률은 최대 ±6%p까지만 바꿔요. "
-                   "단어만 보는 간단한 방식이라 기사 내용을 잘못 읽을 수 있고, 과거 검증은 차트 AI에만 해당돼요.")
+        mood_short = mood.split(" ", 1)[1]
 
-    # ── 지표 ────────────────────────────────────────────
-    st.markdown("### 🧮 현재 지표와 모델이 중요하게 본 요인")
-    f = p.latest_features
-    pct_keys = {"ret_1", "ret_5", "ret_20", "sma5_ratio", "sma20_ratio", "sma60_ratio", "vol_20", "dist_52w_high"}
-    rows = []
-    for k in p.importances.index[::-1]:
-        v = f[k]
-        val = f"{v * 100:+.2f}%" if k in pct_keys else f"{v:.2f}" if k != "macd_hist" else f"{v * 100:+.3f}%"
-        rows.append({"지표": FEATURE_LABELS[k], "현재 값": val, "중요도": f"{p.importances[k] * 100:.1f}%"})
-    st.dataframe(rows, hide_index=True, use_container_width=True)
+    # ① 종목 이름 + 현재가 (한 줄)
+    cls = "upc" if chg > 0 else "dnc" if chg < 0 else ""
+    st.markdown(f"""<div class="sh"><div><b>{p.name.split(' (')[0]}</b><span>{p.ticker}</span></div>
+<div class="pr"><b>{money(last, p.currency)}</b><i class="{cls}">{chg * 100:+.2f}%</i><span>{when_txt}</span></div></div>""",
+                unsafe_allow_html=True)
+
+    # ② 확률 (가장 크게) + 막대
+    big_cls = "upc" if up >= 50 else "dnc"
+    st.markdown(f"""<div class="hero"><small>{p.horizon}거래일 뒤 오를 확률</small>
+<div class="big {big_cls}">{up:.1f}%</div>
+<div class="bar"><div class="fill" style="width:{up:.1f}%"></div><div class="mark" style="left:{p.base_rate * 100:.1f}%"></div></div>
+<div class="bl"><span class="upc">상승 {up:.1f}%</span><span>│ 평소 {p.base_rate * 100:.0f}%</span><span class="dnc">하락 {100 - up:.1f}%</span></div>
+<div class="src">📊 차트 AI {p.prob_up * 100:.1f}% · 📰 뉴스 {(final - p.prob_up) * 100:+.1f}%p</div></div>""",
+                unsafe_allow_html=True)
+
+    # ③ 한 줄 요약 + 핵심 3가지
+    direction = ("오를 가능성을 더 높게" if up >= 55 else "내릴 가능성을 더 높게" if up <= 45
+                 else "오를지 내릴지 비슷하게")
+    trust_txt = ("과거 검증에서 단순 찍기보다 조금 나았어요." if trusted
+                 else "다만 이 종목은 과거 검증 성적이 단순 찍기와 비슷해서 참고만 하세요.")
+    st.markdown(f'<div class="sum">💡 AI는 이 종목이 {p.horizon}거래일 뒤 <b>{direction}</b> 보고 있어요. {trust_txt}</div>',
+                unsafe_allow_html=True)
+    kv3 = [("신뢰도", "보통" if trusted else "낮음", ""),
+           ("최근 적중률", f"{hit_rate:.0f}%" if hit_rate == hit_rate else "-", ""),
+           ("뉴스", mood_short, "")]
+    cells = "".join(f"<div><small>{k}</small><b>{v}</b></div>" for k, v, _ in kv3)
+    st.markdown(f'<div class="kv kv3">{cells}</div>', unsafe_allow_html=True)
+
+    # ④ 차트
+    h = p.history.iloc[-252:]
+    fig = go.Figure(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"],
+                                   increasing_line_color="#e5484d", decreasing_line_color="#3b82f6", name="가격"))
+    for n, color in ((20, "orange"), (60, "green")):
+        fig.add_scatter(x=h.index, y=close.rolling(n).mean().iloc[-252:],
+                        line=dict(width=1, color=color), name=f"{n}일선")
+    fig.update_layout(height=280, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=10),
+                      legend=dict(orientation="h", y=1.08, x=0), xaxis=dict(tickformat="%y.%m"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ⑤ 자세한 내용은 탭으로 나눠서
+    tab_n, tab_i, tab_t, tab_d = st.tabs(["📰 뉴스", "🏢 기본 정보", "🎯 적중 기록", "🧮 상세 분석"])
+
+    with tab_n:
+        if news is None:
+            st.info("지금은 뉴스를 불러오지 못했어요. 잠시 뒤 다시 열어 주세요. (확률에는 뉴스를 반영하지 않았어요)")
+        elif not news:
+            st.info("최근 7일 동안 이 종목 관련 뉴스가 없어요. 확률에는 뉴스를 반영하지 않았어요.")
+        else:
+            good, bad = sum(x["sign"] > 0 for x in news), sum(x["sign"] < 0 for x in news)
+            st.markdown(f"**뉴스 분위기: {mood}** · 🔴 호재 {good} · 🔵 악재 {bad} · ⚪ 중립 {len(news) - good - bad} "
+                        f"→ 확률 **{(final - p.prob_up) * 100:+.1f}%p**")
+
+            def show(items):
+                for x in items:
+                    tag = "🔴" if x["sign"] > 0 else "🔵" if x["sign"] < 0 else "⚪"
+                    why = " · ".join([f"+{w}" for w in x["pos"]] + [f"-{w}" for w in x["neg"]])
+                    st.markdown(f"{tag} [{md_escape(x['title'])}]({x['link']})  \n"
+                                f":gray[{md_escape(x['source'])} · {x['when']:%m/%d %H:%M}"
+                                f"{' · ' + md_escape(why) if why else ''}]")
+            show(news[:5])
+            if len(news) > 5:
+                with st.expander(f"뉴스 {len(news) - 5}개 더 보기"):
+                    show(news[5:])
+            st.caption("구글 뉴스 최근 7일 기사 제목의 호재·악재 단어로 판단해요. 최근 기사일수록 크게 반영하고, "
+                       "확률은 최대 ±6%p까지만 바꿔요. 단어만 보는 간단한 방식이라 틀릴 수 있어요.")
+
+    with tab_i:
+        info = cached_info(p.ticker)
+        if info:
+            kv_grid([(k, v, "") for k, v in info.items()])
+            st.caption("한국 종목은 네이버 증권, 해외 종목은 야후 파이낸스 자료예요. 적자 기업 등은 PER이 '-'로 나와요.")
+        else:
+            st.info("지금은 기본 정보를 불러오지 못했어요.")
+
+    with tab_t:
+        live = t[~t["done"]].iloc[:-1]  # 최신 날짜(방금 낸 예측)는 제외
+        hits = int(done["hit"].sum())
+        kv_grid([(f"최근 {len(done)}번 적중률", f"{hit_rate:.1f}%", f"<small>성공 {hits} · 실패 {len(done) - hits}</small>"),
+                 ("'항상 상승' 찍기", f"{(done['ret'] > 0).mean() * 100:.1f}%", "<small>비교용 기준</small>")])
+        rows = []
+        for d, r in t.iloc[-11:-1][::-1].iterrows() if len(t) > 1 else []:
+            if r["done"]:
+                verdict = "✅" if r["hit"] else "❌"
+            else:
+                verdict = "⏳✅" if r["hit"] else "⏳❌"
+            rows.append({"날짜": f"{d:%m/%d}", "AI 예측": f"{'📈' if r['prob_up'] >= 0.5 else '📉'} {r['prob_up'] * 100:.0f}%",
+                         "실제": f"{r['ret'] * 100:+.1f}%", "결과": verdict})
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.caption(f"최근 10번의 예측이에요. 상승 확률 50% 이상이면 '상승' 예측이고, 예측한 날 종가와 {p.horizon}거래일 뒤 "
+                   "종가를 비교해요. ⏳는 아직 기간이 안 끝나 현재가로 중간 판정한 것이에요. 뉴스를 빼고 차트 AI 기준이에요.")
+
+    with tab_d:
+        st.markdown("**🔍 이 예측을 얼마나 믿을 수 있나요?**")
+        kv_grid([("과거 검증 정확도", f"{p.cv_accuracy * 100:.1f}%", ""),
+                 ("단순 찍기 정확도", f"{p.cv_baseline_accuracy * 100:.1f}%", f"<small>차이 {edge:+.1f}%p</small>"),
+                 ("AUC", f"{p.cv_auc:.3f}", "<small>0.5 = 동전 던지기</small>"),
+                 ("학습한 거래일", f"{p.n_samples:,}일", "")])
+        if not trusted:
+            st.warning("이 종목에서는 모델이 '항상 같은 방향을 찍는' 단순 기준선보다 뚜렷하게 낫지 않았어요.")
+        st.caption("과거 데이터를 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀 본 결과(워크포워드 검증)예요.")
+        st.markdown("**🧮 현재 지표와 모델이 중요하게 본 요인**")
+        f = p.latest_features
+        pct_keys = {"ret_1", "ret_5", "ret_20", "sma5_ratio", "sma20_ratio", "sma60_ratio", "vol_20", "dist_52w_high"}
+        rows = []
+        for k in p.importances.index[::-1]:
+            v = f[k]
+            val = f"{v * 100:+.2f}%" if k in pct_keys else f"{v:.2f}" if k != "macd_hist" else f"{v * 100:+.3f}%"
+            rows.append({"지표": FEATURE_LABELS[k], "현재 값": val, "중요도": f"{p.importances[k] * 100:.1f}%"})
+        st.dataframe(rows, hide_index=True, use_container_width=True)
 
 
 # 다른 화면에 가 있어도 검색어·예측 기간이 지워지지 않게 보관
