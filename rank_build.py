@@ -111,8 +111,10 @@ def merge() -> None:
 
 
 def build_themes(feats: pd.DataFrame) -> None:
-    """테마별 종목표(out/themes.csv): 대장주(시가총액 1위)와 '테마가 뜰 때 가장 많이 움직이는 종목'.
-    최근 1년 중 테마 평균 등락률이 상위 10%였던 날(테마 이슈가 된 날)에 평균 몇 % 움직였는지로 고름."""
+    """테마별 종목표(out/themes.csv)와 대장주 3종류.
+    - 시총 대장주(leader): 테마 안 시가총액 1위
+    - 상승 대장주(mover): 최근 3개월 테마가 많이 오른 날(상위 20%) 테마 평균보다 평균 얼마나 더 올랐나 → 1위
+    - 수급 대장주(flow): 최근 5거래일 거래대금 증가(평소 대비) + 매수세(OBV·MFI) → 테마 안에서 가장 강한 종목"""
     import numpy as np
     from market import theme_table
     try:
@@ -125,20 +127,37 @@ def build_themes(feats: pd.DataFrame) -> None:
     th = th.drop_duplicates(["theme_no", "code"]).reset_index(drop=True)
     days = np.sort(feats["date"].unique())[-250:]
     r = feats[feats["date"].isin(days)]
-    wide = r.pivot_table(index="ticker", columns="date", values="mom_1")
-    wide.index = wide.index.str[:6]
-    wide = wide[~wide.index.duplicated()]
-    th["hot_avg"], th["leader"], th["mover"] = np.nan, 0, 0
+
+    def pivot(col, n=None):
+        d = r if n is None else r[r["date"].isin(days[-n:])]
+        w = d.pivot_table(index="ticker", columns="date", values=col)
+        w.index = w.index.str[:6]
+        return w[~w.index.duplicated()]
+
+    wide = pivot("mom_1")  # 날짜별 등락률 (1년)
+    recent = wide[wide.columns[-60:]]  # 최근 약 3개월
+    tv5 = pivot("tv_ratio", 5).mean(axis=1)  # 최근 5일 거래대금 / 20일 평균
+    obv = pivot("obv_slope", 1).iloc[:, -1]  # 최근 20일 매수 쪽 거래량 비중
+    mfi = pivot("mfi", 5).mean(axis=1)  # 자금 유입 강도 (0~100)
+    th["hot_avg"], th["leader"], th["mover"], th["flow"] = np.nan, 0, 0, 0
+    th["tv5"] = th["code"].map(tv5).round(2)
     for _, g in th.groupby("theme_no"):
-        codes = [c for c in g["code"] if c in wide.index]
+        codes = [c for c in g["code"] if c in recent.index]
         if len(codes) >= 3:
-            R = wide.loc[codes]
+            R = recent.loc[codes]
             avg = R.mean()
-            hot = R.loc[:, avg >= avg.quantile(0.9)]
-            ha = hot.mean(axis=1)[hot.count(axis=1) >= 15]
+            hot_days = avg[avg >= avg.quantile(0.8)].index
+            rel = R[hot_days].sub(avg[hot_days], axis=1)  # 테마 평균보다 얼마나 더 올랐나
+            ha = rel.mean(axis=1)[rel.count(axis=1) >= 6]
             th.loc[g.index, "hot_avg"] = g["code"].map(ha).to_numpy()
             if len(ha):
                 th.loc[g.index[(g["code"] == ha.idxmax()).to_numpy()], "mover"] = 1
+            # 수급: 거래대금 증가 순위 + 매수세 순위 (거래대금이 평소보다 늘어난 종목만)
+            f = pd.DataFrame({"tv": tv5.reindex(codes), "obv": obv.reindex(codes), "mfi": mfi.reindex(codes)}).dropna()
+            f = f[f["tv"] > 1]
+            if len(f):
+                score = f["tv"].rank(pct=True) + (f["obv"].rank(pct=True) + f["mfi"].rank(pct=True)) / 2
+                th.loc[g.index[(g["code"] == score.idxmax()).to_numpy()], "flow"] = 1
         if g["mcap"].notna().any():
             th.loc[g["mcap"].idxmax(), "leader"] = 1
     th["hot_avg"] = th["hot_avg"].round(4)

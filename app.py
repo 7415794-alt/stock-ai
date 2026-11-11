@@ -264,10 +264,10 @@ def scorecard_box(compact=False):
     st.markdown(f"#### 📋 어제 AI 성적표 <small>({d0} 예측 → {d1} 결과)</small>", unsafe_allow_html=True)
     up_cls = "upc" if r["up_avg"] > 0 else "dnc"
     cells = [("📈 상승 TOP 20", f'{int(r["up_hit"])}개 올랐어요',
-              f'<small>{up_pct:.0f}% 적중 · 평균 <span class="{up_cls}">{r["up_avg"] * 100:+.2f}%</span></small>'),
+              f'<small>{up_pct:.0f}% 적중 · 평균 <span class="{up_cls}">{r["up_avg"] * 100:+.1f}%</span></small>'),
              ("📉 하락 TOP 20", f'{int(r["down_hit"])}개 내렸어요',
-              f'<small>{r["down_hit"] / r["down_n"] * 100:.0f}% 적중 · 평균 {r["down_avg"] * 100:+.2f}%</small>'),
-             ("전체 종목 (비교용)", f"{all_pct:.0f}% 올랐어요", f'<small>평균 {r["all_avg"] * 100:+.2f}%</small>')]
+              f'<small>{r["down_hit"] / r["down_n"] * 100:.0f}% 적중 · 평균 {r["down_avg"] * 100:+.1f}%</small>'),
+             ("전체 종목 (비교용)", f"{all_pct:.0f}% 올랐어요", f'<small>평균 {r["all_avg"] * 100:+.1f}%</small>')]
     if len(card) >= 2:
         last = card.tail(20)
         cells.append((f"최근 {len(last)}일 평균", f'{last["up_hit"].sum() / last["up_n"].sum() * 100:.0f}% 적중',
@@ -657,7 +657,7 @@ def analysis_tab():
     # ① 종목 이름 + 현재가 (한 줄)
     cls = "upc" if c["chg"] > 0 else "dnc" if c["chg"] < 0 else ""
     st.markdown(f"""<div class="sh"><div><b>{short}</b><span>{p.ticker}</span></div>
-<div class="pr"><b>{money(last, p.currency)}</b><i class="{cls}">{c['chg'] * 100:+.2f}%</i><span>{c['when_txt']}</span></div></div>""",
+<div class="pr"><b>{money(last, p.currency)}</b><i class="{cls}">{c['chg'] * 100:+.1f}%</i><span>{c['when_txt']}</span></div></div>""",
                 unsafe_allow_html=True)
 
     # 관심 종목 · 공유 버튼 (한 줄에 나란히)
@@ -889,7 +889,7 @@ def analysis_tab():
         rows = []
         for k in p.importances.index[::-1]:
             v = f[k]
-            val = f"{v * 100:+.2f}%" if k in pct_keys else f"{v:.2f}" if k != "macd_hist" else f"{v * 100:+.3f}%"
+            val = f"{v * 100:+.1f}%" if k in pct_keys else f"{v:.2f}" if k != "macd_hist" else f"{v * 100:+.3f}%"
             rows.append({"지표": FEATURE_LABELS[k], "현재 값": val, "중요도": f"{p.importances[k] * 100:.1f}%"})
         st.dataframe(rows, hide_index=True, use_container_width=True)
 
@@ -1140,7 +1140,7 @@ def market_tab():
         for x in snap:
             val = f"{x['last']:,.2f}원" if "환율" in x["name"] else f"{x['last']:,.2f}"
             cls, arrow = ("upc", "▲") if x["chg"] > 0 else ("dnc", "▼") if x["chg"] < 0 else ("", "")
-            cells.append((x["name"], val, f'<i class="{cls}">{arrow}{x["chg"] * 100:+.2f}%</i>'))
+            cells.append((x["name"], val, f'<i class="{cls}">{arrow}{x["chg"] * 100:+.1f}%</i>'))
         kv_grid(cells)
         st.caption("전 거래일 종가 대비 · 장중에는 약 20분 늦은 값 · 미국 지수는 한국 시간 새벽에 마감해요.")
         fig = go.Figure()
@@ -1280,7 +1280,7 @@ def holdings_tab():
             cls = "upc" if gain > 0 else "dnc" if gain < 0 else ""
             kv_grid([("지금 가치", f"{tot_now:,.0f}원", f"<small>산 금액 {tot_buy:,.0f}원</small>"),
                      ("수익", f'<span class="{cls}">{gain:+,.0f}원</span>',
-                      f'<small class="{cls}">{gain / tot_buy * 100:+.2f}%</small>')])
+                      f'<small class="{cls}">{gain / tot_buy * 100:+.1f}%</small>')])
             if foreign:
                 st.caption("해외 종목은 통화가 달라서 합계에서 빠져요.")
         st.markdown(f"#### 💼 내 종목 {len(rows)}개 · AI {horizon}일 뒤")
@@ -1326,9 +1326,15 @@ def holdings_tab():
 def load_themes():
     """매일 순위 계산 때 만든 테마별 종목표 (대장주·이슈 때 많이 움직이는 종목 표시 포함)."""
     try:
-        return pd.read_csv(RANK_URL + "themes.csv", dtype={"code": str})
+        th = pd.read_csv(RANK_URL + "themes.csv", dtype={"code": str})
     except Exception:
         return None
+    for col in ("leader", "mover", "flow"):  # 예전 파일에 없는 칸은 0으로
+        if col not in th:
+            th[col] = 0
+    if "tv5" not in th:
+        th["tv5"] = float("nan")
+    return th
 
 
 @st.cache_data(ttl=300, show_spinner=False)  # 테마 등락률은 5분마다 새로
@@ -1426,7 +1432,7 @@ def theme_news_block(no, theme, names, live=True):
         eff = srow.get(f"{key}_eff")
         if not n or n != n or eff != eff:
             continue
-        t = f"{'🔴' if key == 'up' else '🔵'} {word} 소식이 나온 날({int(n)}일) 테마 평균 {eff * 100:+.2f}%p (평소 대비) · 영향 강도 **{srow.get(f'{key}_strength')}**"
+        t = f"{'🔴' if key == 'up' else '🔵'} {word} 소식이 나온 날({int(n)}일) 테마 평균 {eff * 100:+.1f}%p (평소 대비) · 영향 강도 **{srow.get(f'{key}_strength')}**"
         mv = srow.get(f"{key}_mover")
         if isinstance(mv, str) and mv:
             t += f" · 가장 크게 {verb} 종목: **{names.get(mv, mv)}** ({srow.get(f'{key}_mover_avg') * 100:+.1f}%)"
@@ -1452,12 +1458,13 @@ def more_themes():
 def _chg(v):
     if v != v:
         return "-"
-    return f":red[+{v:.2f}%]" if v > 0 else f":blue[{v:.2f}%]" if v < 0 else "0.00%"
+    return f":red[+{v:.1f}%]" if v > 0 else f":blue[{v:.1f}%]" if v < 0 else "0.0%"
 
 
 def theme_tab():
-    st.caption("테마를 누르면 펼쳐져요. 👑 대장주 = 테마 안에서 시가총액 1위 · ⚡ = 최근 1년 이 테마가 크게 오른 날 "
-               "평균적으로 가장 많이 오른 종목. 종목을 누르면 AI 분석으로 이동해요.")
+    st.caption("테마를 누르면 펼쳐지고 맨 위에 대장주 3종류가 나와요. 👑 시총 대장주 = 테마 안 시가총액 1위 · "
+               "🚀 상승 대장주 = 최근 3개월 테마가 오른 날 테마 평균보다 가장 강했던 종목 · "
+               "💰 수급 대장주 = 최근 5일 거래대금 증가와 매수세가 가장 강한 종목. 종목을 누르면 AI 분석으로 이동해요.")
     th = load_themes()
     if th is None or th.empty:
         st.info("테마 자료를 준비 중이에요. 매일 오후 5시 AI 순위 계산 때 함께 만들어져요.")
@@ -1509,20 +1516,40 @@ def theme_rows(heads, th, horizon, me=None):
             theme_members_view(th[th["theme_no"] == r.theme_no], r.desc, horizon, probs, me)
 
 
+ROLES = [("leader", "👑", "시총 대장주"), ("mover", "🚀", "상승 대장주"), ("flow", "💰", "수급 대장주")]
+
+
 def role_of(m):
-    return ("👑 대장주 · " if m.leader else "") + ("⚡ 이슈 때 최다 상승 · " if m.mover else "")
+    return "".join(f"{icon} {name} · " for col, icon, name in ROLES if getattr(m, col, 0))
+
+
+def _won(v):
+    if v != v or not v:
+        return "-"
+    return f"{v / 1e12:,.1f}조" if v >= 1e12 else f"{v / 1e8:,.0f}억"
+
+
+def role_reason(col, m):
+    """대장주로 뽑힌 이유 한 줄."""
+    if col == "leader":
+        return f"시가총액 {_won(m.mcap)} (테마 1위)"
+    if col == "mover":
+        return (f"최근 3개월 테마가 오른 날 테마 평균보다 평균 {m.hot_avg * 100:+.1f}%p 더 움직였어요"
+                if m.hot_avg == m.hot_avg else "최근 테마 상승일에 가장 강했어요")
+    return (f"최근 5일 거래대금이 평소의 {m.tv5:.1f}배 · 매수세 강함"
+            if m.tv5 == m.tv5 else "거래대금 증가와 매수세가 가장 강해요")
 
 
 def stock_theme_line(code):
-    """종목 분석 화면 위쪽 한 줄: 이 종목이 속한 테마 (대장주·⚡ 표시)."""
+    """종목 분석 화면 위쪽 한 줄: 이 종목이 속한 테마 (👑🚀💰 대장주 표시)."""
     th = load_themes() if code and code.isdigit() else None
     if th is None or th.empty:
         return
     mine = th[th["code"] == code]
     if mine.empty:
         return
-    mine = mine.assign(o=-(mine["leader"] * 2 + mine["mover"])).sort_values("o")
-    parts = [m.theme + (" 👑" if m.leader else "") + (" ⚡" if m.mover else "") for m in mine.itertuples()]
+    mine = mine.assign(o=-(mine["leader"] + mine["mover"] + mine["flow"])).sort_values("o")
+    parts = [m.theme + "".join(f" {icon}" for col, icon, _ in ROLES if getattr(m, col, 0)) for m in mine.itertuples()]
     more = f" 외 {len(parts) - 4}개" if len(parts) > 4 else ""
     st.markdown(f'<div class="follow">🧩 <b>테마</b> {" · ".join(parts[:4])}{more} <small>(자세히: 테마 탭)</small></div>',
                 unsafe_allow_html=True)
@@ -1541,13 +1568,11 @@ def stock_themes(code, horizon):
     if mine.empty:
         st.info("이 종목은 네이버 증권 테마에 들어 있지 않아요.")
         return
-    lead = [m.theme for m in mine.itertuples() if m.leader]
-    move = [m.theme for m in mine.itertuples() if m.mover]
     lines = [f"이 종목이 속한 테마 {len(mine)}개 (오늘 많이 오른 순)"]
-    if lead:
-        lines.append("👑 대장주인 테마: " + ", ".join(lead))
-    if move:
-        lines.append("⚡ 테마 이슈 때 가장 많이 오르는 종목인 테마: " + ", ".join(move))
+    for col, icon, name in ROLES:
+        hit = [m.theme for m in mine.itertuples() if getattr(m, col, 0)]
+        if hit:
+            lines.append(f"{icon} {name}인 테마: " + ", ".join(hit))
     st.markdown("<div class='follow'>" + "<br>".join(html.escape(x) for x in lines) + "</div>", unsafe_allow_html=True)
     st.caption("테마를 누르면 최근 소식과 과거 영향 분석이 펼쳐져요. '종목 전체 보기'를 누르면 🧩 테마 화면으로 가요(📍 = 이 종목).")
     heads = theme_heads(th)
@@ -1558,7 +1583,7 @@ def stock_themes(code, horizon):
         tag = f" · {role[r.theme_no]}" if role.get(r.theme_no) else ""
         adj = stats["adj"].get(r.theme_no) if stats is not None and "adj" in stats else None
         news_tag = f" · 소식 {adj * 100:+.1f}%p" if adj and adj == adj and abs(adj) >= 0.0005 else ""
-        with st.expander(f"{r.theme} · {r.chg:+.2f}% · {r.n}종목{tag}{news_tag}"):
+        with st.expander(f"{r.theme} · {r.chg:+.1f}% · {r.n}종목{tag}{news_tag}"):
             g = th[th["theme_no"] == r.theme_no]
             theme_news_block(r.theme_no, r.theme, dict(zip(g["code"], g["name"])), live=False)
             st.button(f"🧩 {r.theme} 종목 전체 보기 ›", key=f"rk_sth_{r.theme_no}",
@@ -1580,31 +1605,37 @@ def go_theme(no, name, me=None):
 def theme_members_view(g, desc, horizon, probs, me=None):
     now = cached_theme_members(int(g["theme_no"].iloc[0]))  # 지금 등락률 (없으면 저장된 장 마감 값)
     g = g.assign(now=[now.get(c, v) for c, v in zip(g["code"], g["chg"])])
-    g = g.assign(order=-(g["leader"] * 2 + g["mover"])).sort_values(["order", "now"], ascending=[True, False])
+    g = g.sort_values("now", ascending=False)
+    no = int(g["theme_no"].iloc[0])
+
+    def label_of(m, tag):
+        if is_halted(m.code):
+            return f"{tag}{m.name} · ⛔ 거래정지"
+        p = probs.get(m.code)
+        return (f"{tag}{m.name} · {_chg(m.now)}" + (f" · AI {p * 100:.0f}%" if p == p and p is not None else "")
+                + warn_tag(m.code))
+
     with st.container(border=True):
+        # 🏆 대장주 3종류를 맨 위에 (바로 찾을 수 있게)
+        st.markdown("**🏆 대장주**")
+        for col, icon, name in ROLES:
+            pick = g[g[col] == 1]
+            if pick.empty:
+                st.caption(f"{icon} {name}: 자료 부족")
+                continue
+            m = next(pick.itertuples())
+            st.button(label_of(m, f"{'📍 ' if m.code == me else ''}{icon} **{name}** · "),
+                      key=f"rk_thl_{no}_{col}", on_click=open_stock, args=(m.code, horizon), use_container_width=True)
+            why = m.why[:70] + ("…" if len(m.why) > 70 else "") if isinstance(m.why, str) and m.why else ""
+            st.caption(role_reason(col, m) + (f" · {why}" if why else ""))
         if isinstance(desc, str) and desc:
             st.caption(desc)
-        no = int(g["theme_no"].iloc[0])
         theme_news_block(no, g["theme"].iloc[0], dict(zip(g["code"], g["name"])))
-        st.markdown("**📋 테마 종목**")
+        st.markdown("**📋 테마 종목** (오늘 많이 오른 순)")
         for i, m in enumerate(g.itertuples()):
-            tag = ("📍 " if m.code == me else "") + role_of(m)
-            if is_halted(m.code):
-                label = f"{tag}{m.name} · ⛔ 거래정지"
-            else:
-                p = probs.get(m.code)
-                label = f"{tag}{m.name} · {_chg(m.now)}" + (f" · AI {p * 100:.0f}%" if p == p and p is not None else "")
-                label += warn_tag(m.code)
-            st.button(label, key=f"rk_th_{m.theme_no}_{i}", on_click=open_stock, args=(m.code, horizon),
-                      use_container_width=True)
-            if m.leader or m.mover:
-                sub = []
-                if m.mover and m.hot_avg == m.hot_avg:
-                    sub.append(f"⚡ 최근 1년 이 테마가 크게 오른 날 평균 {m.hot_avg * 100:+.1f}%")
-                if isinstance(m.why, str) and m.why:
-                    sub.append(m.why)
-                if sub:
-                    st.caption(" · ".join(sub))
+            tag = ("📍 " if m.code == me else "") + "".join(icon for col, icon, _ in ROLES if getattr(m, col, 0))
+            st.button(label_of(m, tag + (" " if tag else "")), key=f"rk_th_{m.theme_no}_{i}", on_click=open_stock,
+                      args=(m.code, horizon), use_container_width=True)
         st.caption(f"AI = {horizon}거래일 뒤 오를 확률(장 마감 후 계산, 뉴스 미반영) · 누르면 자세한 분석으로 이동")
 
 
