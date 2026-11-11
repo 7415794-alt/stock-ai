@@ -63,5 +63,8 @@ jobs:
           git add rankings.csv meta.json pool
           [ -f prev_rankings.csv ] && git add prev_rankings.csv
           [ -f scorecard.csv ] && git add scorecard.csv
+          [ -f themes.csv ] && git add themes.csv
+          [ -f theme_news.csv ] && git add theme_news.csv
+          [ -f theme_stats.csv ] && git add theme_stats.csv
           git commit -q -m "순위 갱신 $(date -u +%F)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
