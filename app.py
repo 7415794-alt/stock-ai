@@ -1,4 +1,5 @@
 """주식 AI 상승/하락 확률 분석 앱. 실행: streamlit run app.py"""
+import html
 import json
 import os
 import time
@@ -9,8 +10,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from market import ai_mood, company, halted, krx_status, market_clock, market_snapshot
-from news import adjust, fetch_news, news_score
+from market import ai_mood, company, halted, krx_status, market_clock, market_snapshot, theme_list, theme_members
+from news import adjust, fetch_news, news_score, theme_news
 from indicators import build_1d, cols_for, fundamentals_now, indicators_for
 from predictor import FEATURE_LABELS, live_price, load_history, load_index, market_index, predict, resolve_ticker
 
@@ -310,8 +311,8 @@ def move_txt(prev, ticker, rank, size):
     return f" · ▲{diff}" if diff > 0 else f" · ▼{-diff}" if diff < 0 else " · -"
 
 
-PAGES = ["🔍 분석", "💼 내 종목", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
-P_ANALYZE, P_HOLD, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
+PAGES = ["🔍 분석", "💼 내 종목", "🧩 테마", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
+P_ANALYZE, P_HOLD, P_THEME, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
 SHARE_URL = "https://7415794-alt.github.io/stock-ai-icon/"  # 공유 링크 = 앱 껍데기 주소
 
 
@@ -424,6 +425,9 @@ def core(ticker, name, horizon):
     news = cached_news(p.name, p.ticker)
     score = news_score(news) if news else 0.0
     final = adjust(p.prob_up, score)  # 차트 AI 확률 + 뉴스 분위기
+    news_adj = final - p.prob_up
+    theme_adj = stock_theme_adj(code_of(p.ticker), p.horizon)  # + 이 종목이 속한 테마의 최근 소식
+    final = min(max(final + theme_adj, 0.01), 0.99)
     if not news:
         mood = "뉴스 없음"
     else:
@@ -447,7 +451,7 @@ def core(ticker, name, horizon):
             pool_n = len(pool)
     year = close[close.index >= close.index[-1] - pd.Timedelta(days=365)]
     return {"p": p, "close": close, "last": last, "chg": last / prev - 1, "when_txt": when_txt,
-            "news": news, "score": score, "final": final, "mood": mood, "t": t, "done": done,
+            "news": news, "score": score, "final": final, "news_adj": news_adj, "theme_adj": theme_adj, "mood": mood, "t": t, "done": done,
             "hit_rate": hit_rate, "top": top, "pool_n": pool_n, "follow": ai_follow(t, horizon),
             "year_ret": float(last / year.iloc[0] - 1), "short": p.name.split(" (")[0]}
 
@@ -682,7 +686,8 @@ def analysis_tab():
 <div class="big {big_cls}">{up:.1f}%</div>
 <div class="bar"><div class="fill" style="width:{up:.1f}%"></div><div class="mark" style="left:{p.base_rate * 100:.1f}%"></div></div>
 <div class="bl"><span class="upc">상승 {up:.1f}%</span><span>│ 평소 {p.base_rate * 100:.0f}%</span><span class="dnc">하락 {100 - up:.1f}%</span></div>
-<div class="src">📊 차트 AI {p.prob_up * 100:.1f}% · 📰 뉴스 {(final - p.prob_up) * 100:+.1f}%p</div></div>""",
+<div class="src">📊 차트 AI {p.prob_up * 100:.1f}% · 📰 뉴스 {c["news_adj"] * 100:+.1f}%p{
+    f" · 🧩 테마 소식 {c['theme_adj'] * 100:+.1f}%p" if abs(c["theme_adj"]) >= 0.0005 else ""}</div></div>""",
                 unsafe_allow_html=True)
 
     # ③ 한 줄 요약 + 핵심 3가지
@@ -710,6 +715,8 @@ def analysis_tab():
                     f' · 그냥 갖고 있었다면 {fl["hold_ret"] * 100:+.1f}% <small>(자세히: AI 성적 탭)</small></div>',
                     unsafe_allow_html=True)
 
+    stock_theme_line(code)
+
     # ④ 차트
     h = p.history.iloc[-252:]
     fig = go.Figure(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"],
@@ -724,7 +731,9 @@ def analysis_tab():
     vote_box(p.ticker, short, p.horizon, last, up)
 
     # ⑤ 자세한 내용은 탭으로 나눠서
-    tab_n, tab_i, tab_t, tab_d = st.tabs(["📰 뉴스", "🏢 기업 정보", "🤖 AI 성적", "🧮 상세 분석"])
+    tab_n, tab_i, tab_th, tab_t, tab_d = st.tabs(["📰 뉴스", "🏢 기업 정보", "🧩 테마", "🤖 AI 성적", "🧮 상세 분석"])
+    with tab_th:
+        stock_themes(code, p.horizon)
 
     with tab_n:
         if news is None:
@@ -1035,7 +1044,7 @@ if "_boot" not in st.session_state:
         st.session_state.horizon = int(qp.get("h")) if qp.get("h") in ("1", "5", "20") else 5
 
 # 다른 화면에 가 있어도 검색어·예측 기간이 지워지지 않게 보관
-for k in ("query", "horizon", "cmp_a", "cmp_b", "sc_prob", "sc_hit", "sc_mkt", "sc_price", "sc_safe"):
+for k in ("query", "horizon", "cmp_a", "cmp_b", "theme_q", "sc_prob", "sc_hit", "sc_mkt", "sc_price", "sc_safe"):
     if k in st.session_state:
         st.session_state[k] = st.session_state[k]
 st.session_state.setdefault("horizon", 5)
@@ -1313,6 +1322,292 @@ def holdings_tab():
     vote_section()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_themes():
+    """매일 순위 계산 때 만든 테마별 종목표 (대장주·이슈 때 많이 움직이는 종목 표시 포함)."""
+    try:
+        return pd.read_csv(RANK_URL + "themes.csv", dtype={"code": str})
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)  # 테마 등락률은 5분마다 새로
+def cached_theme_live():
+    try:
+        return {t["no"]: t for t in theme_list()}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_theme_members(no):
+    try:
+        return {m["code"]: m["chg"] for m in theme_members(no)[1]}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_theme_stats():
+    """테마별 과거 뉴스 영향 분석 (매일 오후 5시 계산)."""
+    try:
+        return pd.read_csv(RANK_URL + "theme_stats.csv", dtype={"up_mover": str, "down_mover": str})             .set_index("theme_no")
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_theme_news():
+    try:
+        return pd.read_csv(RANK_URL + "theme_news.csv")
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)  # 펼친 테마의 최근 소식은 30분마다 새로
+def cached_theme_news(theme):
+    try:
+        return [{**x, "when": x["when"].strftime("%Y-%m-%d %H:%M")} for x in theme_news(theme, days=14)]
+    except Exception:
+        return None
+
+
+HORIZON_FADE = {1: 1.0, 5: 0.6, 20: 0.3}  # 테마 소식의 효과는 기간이 길수록 약해짐
+
+
+def stock_theme_adj(code, horizon):
+    """이 종목이 속한 테마들의 최근 소식 × 과거에 다음 날까지 이어진 효과 → 확률 보정 (최대 ±2%p)."""
+    if not (code and code.isdigit()):
+        return 0.0
+    th, stats = load_themes(), load_theme_stats()
+    if th is None or stats is None or "adj" not in stats:
+        return 0.0
+    nos = th.loc[th["code"] == code, "theme_no"]
+    adj = stats["adj"].reindex(nos).dropna()
+    adj = adj[adj != 0]
+    if adj.empty:
+        return 0.0
+    return float(min(max(adj.mean() * HORIZON_FADE.get(horizon, 0.5), -0.02), 0.02))
+
+
+SIGN_TXT = {1: "🔴 호재", -1: "🔵 악재", 0: "⚪ 중립"}
+
+
+def theme_news_block(no, theme, names, live=True):
+    """테마 최근 소식 5개(호재·악재·중립 + 영향 강도) + 과거 영향 분석 + 그때 가장 크게 움직인 종목."""
+    stats = load_theme_stats()
+    srow = stats.loc[no] if stats is not None and no in stats.index else None
+    items = cached_theme_news(theme) if live else None
+    when_note = "최근 2주"
+    if not items:  # 실시간으로 못 받으면 오후 5시에 저장해 둔 소식
+        nd = load_theme_news()
+        items = nd[nd["theme_no"] == no].to_dict("records") if nd is not None else []
+        when_note = "오후 5시 기준"
+    st.markdown("**📰 최근 이슈**")
+    if not items:
+        st.caption("최근 관련 소식이 없어요.")
+    for x in items[:5]:
+        sign = int(x["sign"])
+        strength = ""
+        if srow is not None and sign != 0:
+            sv = srow.get("up_strength" if sign > 0 else "down_strength")
+            if isinstance(sv, str) and sv != "자료 부족":
+                strength = f" · 영향 강도 **{sv}**"
+        title = html.escape(str(x["title"]))
+        st.markdown(f"{SIGN_TXT[sign]}{strength} · [{title}]({x['link']}) "
+                    f"<small style='color:gray'>{html.escape(str(x['source']))} · {str(x['when'])[5:16]}</small>",
+                    unsafe_allow_html=True)
+    if srow is None or srow.get("sigma") != srow.get("sigma"):
+        st.caption(f"AI 분석: 제목의 호재·악재 단어로 판단 ({when_note}). 과거 영향 분석은 자료가 부족해요.")
+        return
+    lines = []
+    for key, word, verb in (("up", "호재", "오른"), ("down", "악재", "내린")):
+        n = srow.get(f"{key}_days")
+        eff = srow.get(f"{key}_eff")
+        if not n or n != n or eff != eff:
+            continue
+        t = f"{'🔴' if key == 'up' else '🔵'} {word} 소식이 나온 날({int(n)}일) 테마 평균 {eff * 100:+.2f}%p (평소 대비) · 영향 강도 **{srow.get(f'{key}_strength')}**"
+        mv = srow.get(f"{key}_mover")
+        if isinstance(mv, str) and mv:
+            t += f" · 가장 크게 {verb} 종목: **{names.get(mv, mv)}** ({srow.get(f'{key}_mover_avg') * 100:+.1f}%)"
+        lines.append(t)
+    if lines:
+        st.markdown("**🔎 과거 1년 분석**  \n" + "  \n".join(lines))
+    adj = srow.get("adj")
+    if adj and adj == adj and abs(adj) >= 0.0005:
+        st.caption(f"📈 최근 2일 소식과 과거에 '다음 날까지 이어진' 효과를 바탕으로, 이 테마 종목의 분석 화면 확률에 "
+                   f"{adj * 100:+.1f}%p(1일 뒤 기준, 5일 뒤 ×0.6, 20일 뒤 ×0.3)를 더했어요.")
+    st.caption("영향 강도: 소식이 나온 날 테마 평균 등락이 평소보다 얼마나 컸는지 (강·중·약). "
+               "호재·악재는 기사 제목의 단어로 AI가 판단해요. 과거 결과가 앞으로를 보장하지 않아요.")
+
+
+def toggle_theme(no):
+    st.session_state.theme_open = None if st.session_state.get("theme_open") == no else no
+
+
+def more_themes():
+    st.session_state.theme_more = st.session_state.get("theme_more", 30) + 30
+
+
+def _chg(v):
+    if v != v:
+        return "-"
+    return f":red[+{v:.2f}%]" if v > 0 else f":blue[{v:.2f}%]" if v < 0 else "0.00%"
+
+
+def theme_tab():
+    st.caption("테마를 누르면 펼쳐져요. 👑 대장주 = 테마 안에서 시가총액 1위 · ⚡ = 최근 1년 이 테마가 크게 오른 날 "
+               "평균적으로 가장 많이 오른 종목. 종목을 누르면 AI 분석으로 이동해요.")
+    th = load_themes()
+    if th is None or th.empty:
+        st.info("테마 자료를 준비 중이에요. 매일 오후 5시 AI 순위 계산 때 함께 만들어져요.")
+        return
+    horizon = st.segmented_control("예측 기간", [1, 5, 20], key="horizon", on_change=keep_horizon,
+                                   format_func=lambda d: f"{d}일 뒤", label_visibility="collapsed") or 5
+    with st.container(key="row_theme"):
+        c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
+        q = c1.text_input("테마 검색", key="theme_q", placeholder="🔍 테마 이름 (예: 반도체, 2차전지, 방산)",
+                          label_visibility="collapsed")
+        c2.button("확인", key="theme_ok")
+
+    heads = theme_heads(th)
+    if q:
+        heads = heads[heads["theme"].str.contains(q.strip(), case=False, regex=False)]
+        if heads.empty:
+            st.warning("그런 이름의 테마가 없어요.")
+            return
+    heads = heads.sort_values("chg", ascending=False)
+    st.caption(f"테마 {len(heads)}개 · 오늘 많이 오른 순 · 등락률은 네이버 증권 테마 기준")
+
+    limit = st.session_state.get("theme_more", 30)
+    theme_rows(heads.head(limit), th, horizon, me=st.session_state.get("theme_me"))
+    if len(heads) > limit:
+        st.button("테마 더 보기 ›", key="theme_more_btn", on_click=more_themes)
+
+
+def theme_heads(th):
+    """테마마다 한 줄: 이름·지금 등락률·종목 수·설명."""
+    live = cached_theme_live()
+    heads = th.drop_duplicates("theme_no")[["theme_no", "theme", "theme_chg", "desc"]].copy()
+    heads["chg"] = [live.get(n, {}).get("chg", c) for n, c in zip(heads["theme_no"], heads["theme_chg"])]
+    heads["n"] = heads["theme_no"].map(th.groupby("theme_no").size())
+    return heads
+
+
+def theme_rows(heads, th, horizon, me=None):
+    """테마 버튼 목록. 누르면 펼쳐져서 종목이 나옴 (me = 지금 보고 있는 종목 코드, 📍 표시)."""
+    rank_df, _ = load_rankings()
+    probs = {}
+    if rank_df is not None:
+        d = rank_df[rank_df["horizon"] == horizon]
+        probs = dict(zip(d["ticker"].str[:6], d["prob_up"]))
+    for r in heads.itertuples():
+        is_open = st.session_state.get("theme_open") == r.theme_no
+        st.button(f"{'▼' if is_open else '▶'} **{r.theme}** · {_chg(r.chg)} · {r.n}종목",
+                  key=f"rk_thh_{r.theme_no}", on_click=toggle_theme, args=(r.theme_no,), use_container_width=True)
+        if is_open:
+            theme_members_view(th[th["theme_no"] == r.theme_no], r.desc, horizon, probs, me)
+
+
+def role_of(m):
+    return ("👑 대장주 · " if m.leader else "") + ("⚡ 이슈 때 최다 상승 · " if m.mover else "")
+
+
+def stock_theme_line(code):
+    """종목 분석 화면 위쪽 한 줄: 이 종목이 속한 테마 (대장주·⚡ 표시)."""
+    th = load_themes() if code and code.isdigit() else None
+    if th is None or th.empty:
+        return
+    mine = th[th["code"] == code]
+    if mine.empty:
+        return
+    mine = mine.assign(o=-(mine["leader"] * 2 + mine["mover"])).sort_values("o")
+    parts = [m.theme + (" 👑" if m.leader else "") + (" ⚡" if m.mover else "") for m in mine.itertuples()]
+    more = f" 외 {len(parts) - 4}개" if len(parts) > 4 else ""
+    st.markdown(f'<div class="follow">🧩 <b>테마</b> {" · ".join(parts[:4])}{more} <small>(자세히: 테마 탭)</small></div>',
+                unsafe_allow_html=True)
+
+
+def stock_themes(code, horizon):
+    """종목 분석 화면의 '테마' 탭: 이 종목이 속한 테마들 (누르면 펼쳐짐)."""
+    if not (code and code.isdigit()):
+        st.info("테마는 한국 종목만 볼 수 있어요.")
+        return
+    th = load_themes()
+    if th is None or th.empty:
+        st.info("테마 자료를 준비 중이에요. 매일 오후 5시 AI 순위 계산 때 함께 만들어져요.")
+        return
+    mine = th[th["code"] == code]
+    if mine.empty:
+        st.info("이 종목은 네이버 증권 테마에 들어 있지 않아요.")
+        return
+    lead = [m.theme for m in mine.itertuples() if m.leader]
+    move = [m.theme for m in mine.itertuples() if m.mover]
+    lines = [f"이 종목이 속한 테마 {len(mine)}개 (오늘 많이 오른 순)"]
+    if lead:
+        lines.append("👑 대장주인 테마: " + ", ".join(lead))
+    if move:
+        lines.append("⚡ 테마 이슈 때 가장 많이 오르는 종목인 테마: " + ", ".join(move))
+    st.markdown("<div class='follow'>" + "<br>".join(html.escape(x) for x in lines) + "</div>", unsafe_allow_html=True)
+    st.caption("테마를 누르면 최근 소식과 과거 영향 분석이 펼쳐져요. '종목 전체 보기'를 누르면 🧩 테마 화면으로 가요(📍 = 이 종목).")
+    heads = theme_heads(th)
+    heads = heads[heads["theme_no"].isin(mine["theme_no"])].sort_values("chg", ascending=False)
+    role = {m.theme_no: role_of(m).replace(" · ", " ").strip() for m in mine.itertuples()}
+    stats = load_theme_stats()
+    for r in heads.itertuples():
+        tag = f" · {role[r.theme_no]}" if role.get(r.theme_no) else ""
+        adj = stats["adj"].get(r.theme_no) if stats is not None and "adj" in stats else None
+        news_tag = f" · 소식 {adj * 100:+.1f}%p" if adj and adj == adj and abs(adj) >= 0.0005 else ""
+        with st.expander(f"{r.theme} · {r.chg:+.2f}% · {r.n}종목{tag}{news_tag}"):
+            g = th[th["theme_no"] == r.theme_no]
+            theme_news_block(r.theme_no, r.theme, dict(zip(g["code"], g["name"])), live=False)
+            st.button(f"🧩 {r.theme} 종목 전체 보기 ›", key=f"rk_sth_{r.theme_no}",
+                      on_click=go_theme, args=(r.theme_no, r.theme, code), use_container_width=True)
+    adj = stock_theme_adj(code, horizon)
+    if abs(adj) >= 0.0005:
+        st.caption(f"🧩 테마 소식 반영: 이 종목 {horizon}일 뒤 확률에 {adj * 100:+.1f}%p를 더했어요 (속한 테마들의 평균).")
+
+
+def go_theme(no, name, me=None):
+    """종목 분석 → 🧩 테마 화면으로 이동하면서 그 테마를 펼쳐 둠."""
+    st.session_state.page = st.session_state.page_last = P_THEME
+    st.session_state.theme_open = no
+    st.session_state.theme_q = name
+    st.session_state.theme_me = me
+    st.session_state.to_top = True
+
+
+def theme_members_view(g, desc, horizon, probs, me=None):
+    now = cached_theme_members(int(g["theme_no"].iloc[0]))  # 지금 등락률 (없으면 저장된 장 마감 값)
+    g = g.assign(now=[now.get(c, v) for c, v in zip(g["code"], g["chg"])])
+    g = g.assign(order=-(g["leader"] * 2 + g["mover"])).sort_values(["order", "now"], ascending=[True, False])
+    with st.container(border=True):
+        if isinstance(desc, str) and desc:
+            st.caption(desc)
+        no = int(g["theme_no"].iloc[0])
+        theme_news_block(no, g["theme"].iloc[0], dict(zip(g["code"], g["name"])))
+        st.markdown("**📋 테마 종목**")
+        for i, m in enumerate(g.itertuples()):
+            tag = ("📍 " if m.code == me else "") + role_of(m)
+            if is_halted(m.code):
+                label = f"{tag}{m.name} · ⛔ 거래정지"
+            else:
+                p = probs.get(m.code)
+                label = f"{tag}{m.name} · {_chg(m.now)}" + (f" · AI {p * 100:.0f}%" if p == p and p is not None else "")
+                label += warn_tag(m.code)
+            st.button(label, key=f"rk_th_{m.theme_no}_{i}", on_click=open_stock, args=(m.code, horizon),
+                      use_container_width=True)
+            if m.leader or m.mover:
+                sub = []
+                if m.mover and m.hot_avg == m.hot_avg:
+                    sub.append(f"⚡ 최근 1년 이 테마가 크게 오른 날 평균 {m.hot_avg * 100:+.1f}%")
+                if isinstance(m.why, str) and m.why:
+                    sub.append(m.why)
+                if sub:
+                    st.caption(" · ".join(sub))
+        st.caption(f"AI = {horizon}거래일 뒤 오를 확률(장 마감 후 계산, 뉴스 미반영) · 누르면 자세한 분석으로 이동")
+
+
 def keep_page():
     # 이미 선택된 버튼을 한 번 더 눌러 선택이 풀리면 원래 화면으로 되돌림
     if st.session_state.page is None:
@@ -1346,8 +1641,17 @@ clock = cached_clock()
 st.markdown(f'<div class="clock"><b>{clock["label"]}</b> · {clock["note"]}</div>', unsafe_allow_html=True)
 page = st.segmented_control("화면", PAGES, key="page", on_change=keep_page,
                             label_visibility="collapsed") or PAGES[0]
+if st.session_state.pop("to_top", False):
+    # 다른 화면에서 눌러 넘어왔을 때 화면을 맨 위로 올림 (숫자는 매번 새로 실행되게 하는 표시)
+    components.html(f"""<script>/*{time.time()}*/
+      for (const q of ['[data-testid="stMain"]', '[data-testid="stAppViewContainer"]', 'section.main']) {{
+        const el = window.parent.document.querySelector(q); if (el) el.scrollTo(0, 0);
+      }}
+      window.parent.scrollTo(0, 0);</script>""", height=0)
 if page == P_HOLD:
     holdings_tab()
+elif page == P_THEME:
+    theme_tab()
 elif page == P_SCREEN:
     screener_tab()
 elif page == P_PROB:
@@ -1359,13 +1663,6 @@ elif page == P_CMP:
 elif page == P_MARKET:
     market_tab()
 else:
-    if st.session_state.pop("to_top", False):
-        # 순위에서 종목을 눌러 넘어왔을 때 화면을 맨 위로 올림 (숫자는 매번 새로 실행되게 하는 표시)
-        components.html(f"""<script>/*{time.time()}*/
-          for (const q of ['[data-testid="stMain"]', '[data-testid="stAppViewContainer"]', 'section.main']) {{
-            const el = window.parent.document.querySelector(q); if (el) el.scrollTo(0, 0);
-          }}
-          window.parent.scrollTo(0, 0);</script>""", height=0)
     analysis_tab()
 
 

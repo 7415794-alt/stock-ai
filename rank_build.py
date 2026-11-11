@@ -88,6 +88,7 @@ def merge() -> None:
                       ignore_index=True)
     print(f"학습 데이터: {feats['ticker'].nunique()}종목, {len(feats):,}줄", flush=True)
     res = pool.train(feats, "out/pool")
+    build_themes(feats)
     del feats
     res = res[["ticker", "horizon", "prob_up", "hit_rate", "hits", "n_recent"]].rename(columns={"n_recent": "n"})
     live = info[info["halted"] != 1].merge(res, on=["ticker", "horizon"], how="inner")
@@ -107,6 +108,127 @@ def merge() -> None:
     meta["prev_date"] = keep_prev(df, meta["date"])
     Path("out/meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     print(meta)
+
+
+def build_themes(feats: pd.DataFrame) -> None:
+    """테마별 종목표(out/themes.csv): 대장주(시가총액 1위)와 '테마가 뜰 때 가장 많이 움직이는 종목'.
+    최근 1년 중 테마 평균 등락률이 상위 10%였던 날(테마 이슈가 된 날)에 평균 몇 % 움직였는지로 고름."""
+    import numpy as np
+    from market import theme_table
+    try:
+        th = theme_table()
+    except Exception as e:
+        print("테마 불러오기 실패:", e)
+        return
+    if th.empty:
+        return
+    th = th.drop_duplicates(["theme_no", "code"]).reset_index(drop=True)
+    days = np.sort(feats["date"].unique())[-250:]
+    r = feats[feats["date"].isin(days)]
+    wide = r.pivot_table(index="ticker", columns="date", values="mom_1")
+    wide.index = wide.index.str[:6]
+    wide = wide[~wide.index.duplicated()]
+    th["hot_avg"], th["leader"], th["mover"] = np.nan, 0, 0
+    for _, g in th.groupby("theme_no"):
+        codes = [c for c in g["code"] if c in wide.index]
+        if len(codes) >= 3:
+            R = wide.loc[codes]
+            avg = R.mean()
+            hot = R.loc[:, avg >= avg.quantile(0.9)]
+            ha = hot.mean(axis=1)[hot.count(axis=1) >= 15]
+            th.loc[g.index, "hot_avg"] = g["code"].map(ha).to_numpy()
+            if len(ha):
+                th.loc[g.index[(g["code"] == ha.idxmax()).to_numpy()], "mover"] = 1
+        if g["mcap"].notna().any():
+            th.loc[g["mcap"].idxmax(), "leader"] = 1
+    th["hot_avg"] = th["hot_avg"].round(4)
+    th.loc[th["theme_no"].duplicated(), "desc"] = ""  # 테마 설명은 첫 줄에만 (파일 크기 줄이기)
+    th.to_csv("out/themes.csv", index=False, encoding="utf-8")
+    print(f"테마 {th['theme_no'].nunique()}개, 종목 {len(th)}줄", flush=True)
+    try:
+        theme_news_stats(th, wide)
+    except Exception as e:
+        print("테마 뉴스 분석 실패:", e)
+
+
+def _strength(eff: float, sigma: float, n: int) -> str:
+    if n < 5 or not sigma or eff != eff:
+        return "자료 부족"
+    z = abs(eff) / sigma
+    return "강" if z >= 0.4 else "중" if z >= 0.15 else "약"
+
+
+def theme_news_stats(th: pd.DataFrame, wide: pd.DataFrame) -> None:
+    """테마별 최근 1년 뉴스 → (1) 최근 소식 5개(호재·악재·중립), (2) 호재·악재 소식이 나온 날 테마 종목들이
+    얼마나 움직였는지(영향 강도), (3) 그때 가장 크게 움직인 종목, (4) 다음 날까지 이어진 효과로 확률 보정값.
+    결과: out/theme_news.csv, out/theme_stats.csv"""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+    from news import news_score, theme_keyword, theme_news_history
+
+    heads = th.drop_duplicates("theme_no")[["theme_no", "theme"]]
+    days = pd.DatetimeIndex(sorted(wide.columns))
+    wide = wide[days]
+
+    def fetch(row):
+        for i in range(3):
+            try:
+                _t.sleep(0.3)
+                return row, theme_news_history(row.theme)
+            except Exception:
+                _t.sleep(3 * (i + 1))
+        return row, []
+
+    def trade_day(when):  # 소식이 반영되는 거래일: 장 마감(15:30) 뒤 소식은 다음 거래일
+        d = pd.Timestamp(when.tz_localize(None).normalize())
+        after_close = when.hour * 60 + when.minute >= 930
+        i = days.searchsorted(d, side="right" if after_close else "left")
+        return i if i < len(days) else None
+
+    news_rows, stat_rows = [], []
+    now = pd.Timestamp.now(tz="Asia/Seoul")
+    with ThreadPoolExecutor(4) as ex:
+        for row, items in ex.map(fetch, heads.itertuples()):
+            for x in items[:5]:
+                news_rows.append({"theme_no": row.theme_no, "title": x["title"], "link": x["link"],
+                                  "source": x["source"], "when": x["when"].strftime("%Y-%m-%d %H:%M"),
+                                  "sign": x["sign"]})
+            codes = [c for c in th.loc[th["theme_no"] == row.theme_no, "code"] if c in wide.index]
+            st_row = {"theme_no": row.theme_no, "kw": theme_keyword(row.theme), "n_news": len(items)}
+            if len(codes) >= 3 and items:
+                R = wide.loc[codes]
+                tavg = R.mean()  # 날짜별 테마 평균 등락률
+                base, sigma = float(tavg.mean()), float(tavg.std())
+                st_row["sigma"] = round(sigma, 5)
+                for key, sign in (("up", 1), ("down", -1)):
+                    idx = sorted({i for x in items if x["sign"] == sign and (i := trade_day(x["when"])) is not None})
+                    same = [days[i] for i in idx]
+                    nxt = [days[i + 1] for i in idx if i + 1 < len(days)]
+                    eff = float(tavg[same].mean() - base) if same else float("nan")
+                    # 다음 날 효과는 표본이 적으면 0 쪽으로 줄여서 씀 (우연히 큰 값 방지)
+                    eff_next = float(tavg[nxt].mean() - base) * len(nxt) / (len(nxt) + 20) if len(nxt) >= 5 else 0.0
+                    st_row[f"{key}_days"] = len(same)
+                    st_row[f"{key}_eff"] = round(eff, 5) if eff == eff else None
+                    st_row[f"{key}_next"] = round(eff_next, 5)
+                    st_row[f"{key}_strength"] = _strength(eff, sigma, len(same))
+                    if len(same) >= 5:  # 그런 소식이 나온 날 가장 크게 움직인 종목
+                        m = R[same].mean(axis=1)[R[same].count(axis=1) >= 5]
+                        if len(m):
+                            c = m.idxmax() if sign > 0 else m.idxmin()
+                            st_row[f"{key}_mover"] = c
+                            st_row[f"{key}_mover_avg"] = round(float(m[c]), 4)
+                # 확률 보정: 최근 2일 소식 분위기 × 과거 '다음 날까지 이어진' 효과 (최대 ±2%p, 1거래일 기준)
+                fresh = [x for x in items if now - x["when"] <= pd.Timedelta(days=2)]
+                score = news_score(fresh) if fresh else 0.0
+                eff_next = st_row["up_next"] if score > 0 else st_row["down_next"] if score < 0 else 0.0
+                adj = float(np.clip(0.4 * eff_next / sigma * abs(score), -0.02, 0.02)) if sigma else 0.0
+                st_row.update({"fresh_score": round(score, 3), "adj": round(adj, 4)})
+            stat_rows.append(st_row)
+    pd.DataFrame(news_rows).to_csv("out/theme_news.csv", index=False, encoding="utf-8")
+    pd.DataFrame(stat_rows).to_csv("out/theme_stats.csv", index=False, encoding="utf-8")
+    print(f"테마 뉴스: {len(news_rows)}건, 분석 {len(stat_rows)}개 테마", flush=True)
 
 
 def keep_prev(df: pd.DataFrame, today: str) -> str:

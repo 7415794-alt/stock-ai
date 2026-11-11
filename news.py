@@ -108,3 +108,60 @@ def news_score(items: list[dict]) -> float:
 def adjust(prob_up: float, score: float) -> float:
     """차트 AI 확률에 뉴스 점수를 더함 (최대 ±6%p)."""
     return min(max(prob_up + MAX_ADJ * score, 0.01), 0.99)
+
+
+# ───────────── 테마 뉴스 ─────────────
+
+def theme_keyword(theme: str) -> str:
+    """테마 이름 → 뉴스 검색어. '반도체 기판(FC-BGA/PCB/MLB 등)' → '반도체 기판'."""
+    base = re.sub(r"\(.*?\)", "", theme).strip()
+    inner = re.findall(r"\((.*?)\)", theme)
+    if (len(base) < 2 or re.fullmatch(r"[A-Za-z0-9]{1,2}", base)) and inner:
+        base = re.split(r"[/,]", inner[0])[0].strip()
+    return base
+
+
+def _rss(q: str) -> list[dict]:
+    url = f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=ko&gl=KR&ceid=KR:ko"
+    r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    items = []
+    for it in ET.fromstring(r.content).iter("item"):
+        source = it.findtext("source") or ""
+        title = it.findtext("title") or ""
+        if source and title.endswith(" - " + source):
+            title = title[: -len(source) - 3]
+        try:
+            when = pd.Timestamp(parsedate_to_datetime(it.findtext("pubDate"))).tz_convert("Asia/Seoul")
+        except Exception:
+            continue
+        sign, pw, nw = _score_title(title, True)
+        items.append({"title": title, "link": it.findtext("link"), "source": source, "when": when,
+                      "sign": sign, "pos": pw, "neg": nw})
+    return items
+
+
+def _dedupe(items: list[dict]) -> list[dict]:
+    items = sorted(items, key=lambda x: x["when"], reverse=True)
+    seen, out = set(), []
+    for x in items:
+        key = re.sub(r"\W", "", x["title"])[:30]
+        if key not in seen:
+            seen.add(key)
+            out.append(x)
+    return out
+
+
+def theme_news(theme: str, days: int = 7, limit: int = 5) -> list[dict]:
+    """테마 최근 뉴스 (최신순)."""
+    kw = theme_keyword(theme)
+    return _dedupe(_rss(f'"{kw}" (관련주 OR 주가 OR 테마) when:{days}d'))[:limit]
+
+
+def theme_news_history(theme: str) -> list[dict]:
+    """테마 뉴스 최근 약 1년치 (반년씩 두 번 검색해서 합침) — 과거 영향 분석용."""
+    kw = theme_keyword(theme)
+    today = pd.Timestamp.now(tz="Asia/Seoul").normalize()
+    half, year = (today - pd.Timedelta(days=182)).date(), (today - pd.Timedelta(days=365)).date()
+    q = f'"{kw}" (관련주 OR 주가 OR 테마)'
+    return _dedupe(_rss(f"{q} after:{half}") + _rss(f"{q} after:{year} before:{half}"))

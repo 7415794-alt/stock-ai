@@ -227,3 +227,63 @@ def ai_mood(rank: pd.DataFrame) -> pd.DataFrame:
     """순위 데이터로 '상승 확률 50% 이상인 종목 비율'을 기간·시장별로."""
     g = rank.assign(up=rank["prob_up"] >= 0.5)
     return g.groupby(["horizon", "market"])["up"].mean().unstack()
+
+
+# ───────────── 테마 (네이버 증권) ─────────────
+THEME_API = "https://m.stock.naver.com/api/stocks/theme"
+
+
+def theme_list() -> list[dict]:
+    """전체 테마와 오늘 등락률 (장중이면 실시간에 가까움)."""
+    out, total = [], None
+    for page in range(1, 8):
+        d = requests.get(f"{THEME_API}?page={page}&pageSize=100", timeout=10,
+                         headers={"User-Agent": "Mozilla/5.0"}).json()
+        g = d.get("groups") or []
+        out += g
+        total = d.get("totalCount", 0)
+        if not g or len(out) >= total:
+            break
+    return [{"no": int(x["no"]), "theme": x["name"], "chg": _num(x.get("changeRate")),
+             "n": int(x.get("totalCount") or 0), "rise": int(x.get("riseCount") or 0),
+             "fall": int(x.get("fallCount") or 0)} for x in out]
+
+
+def theme_members(no: int) -> tuple[str, list[dict]]:
+    """한 테마의 설명과 종목들 (종목코드·이름·등락률·시가총액·테마에 속한 이유)."""
+    stocks, why, desc = [], {}, ""
+    for page in range(1, 6):  # 한 번에 100종목까지라 넘으면 다음 쪽
+        d = requests.get(f"{THEME_API}/{no}?page={page}&pageSize=100", timeout=10,
+                         headers={"User-Agent": "Mozilla/5.0"}).json()
+        stocks += d.get("stocks") or []
+        why.update(d.get("themeItemInfoMap") or {})
+        desc = desc or d.get("themeDescription") or ""
+        if not d.get("stocks") or len(stocks) >= int(d.get("totalCount") or 0):
+            break
+    rows = []
+    for s in stocks:
+        code = s.get("itemCode")
+        rows.append({"code": code, "name": s.get("stockName"), "chg": _num(s.get("fluctuationsRatio")),
+                     "mcap": _num(s.get("marketValueRaw")), "why": (why.get(code) or "")[:160]})
+    return desc[:300], rows
+
+
+def theme_table() -> pd.DataFrame:
+    """전 테마 × 종목 한 장의 표 (매일 순위 계산 때 만들어 data 브랜치에 저장)."""
+    from concurrent.futures import ThreadPoolExecutor
+    themes = theme_list()
+
+    def one(t):
+        for _ in range(3):
+            try:
+                return t, theme_members(t["no"])
+            except Exception:
+                pass
+        return t, ("", [])
+
+    rows = []
+    with ThreadPoolExecutor(8) as ex:
+        for t, (desc, members) in ex.map(one, themes):
+            for m in members:
+                rows.append({"theme_no": t["no"], "theme": t["theme"], "theme_chg": t["chg"], "desc": desc, **m})
+    return pd.DataFrame(rows)
