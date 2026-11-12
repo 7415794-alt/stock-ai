@@ -7,7 +7,7 @@ on:
   workflow_dispatch:         # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
   push:                      # 이 파일이나 계산 코드를 고쳐서 올리면 바로 한 번 실행
     branches: [main]
-    paths: [".github/workflows/rank.yml", "rank_build.py", "pool.py", "indicators.py"]
+    paths: [".github/workflows/rank.yml", "rank_build.py", "pool.py", "indicators.py", "flow.py"]
 
 permissions:
   contents: write
@@ -66,5 +66,6 @@ jobs:
           [ -f themes.csv ] && git add themes.csv
           [ -f theme_news.csv ] && git add theme_news.csv
           [ -f theme_stats.csv ] && git add theme_stats.csv
+          [ -d flow ] && git add flow
           git commit -q -m "순위 갱신 $(date -u +%F)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
