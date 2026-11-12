@@ -313,7 +313,7 @@ def move_txt(prev, ticker, rank, size):
 
 PAGES = ["🔍 분석", "💼 내 종목", "🧩 테마", "🔎 조건검색", "🏆 확률순위", "🎯 적중순위", "🆚 비교", "🌏 시장 분위기"]
 P_ANALYZE, P_HOLD, P_THEME, P_SCREEN, P_PROB, P_HIT, P_CMP, P_MARKET = PAGES
-SHARE_URL = "https://7415794-alt.github.io/stock-ai-icon/"  # 공유 링크 = 앱 껍데기 주소
+SHARE_URL = "https://stocksignals.kr/stock-ai-icon/"  # 공유 링크 = 앱 껍데기 주소
 
 
 def open_stock(code, horizon):
