@@ -876,7 +876,8 @@ def analysis_tab():
         if edge < 2 or p.cv_auc < 0.53:
             st.warning("이 종목에서는 모델이 '항상 같은 방향을 찍는' 단순 기준선보다 뚜렷하게 낫지 않았어요.")
         if getattr(p, "model", "") == "pool":
-            st.caption("🧠 한국 종목은 코스피·코스닥 전 종목의 10년치 데이터를 AI 하나가 함께 학습해요(매일 장 마감 후 다시 학습). "
+            st.caption("🧠 한국 종목은 코스피·코스닥 전 종목의 10년치 주가 지표와 외국인·기관·개인 수급(전날까지)을 "
+                       "AI 하나가 함께 학습해요(매일 장 마감 후 다시 학습). "
                        "위 성적은 최근 1년을 4구간으로 나눠, 각 구간 전까지의 데이터로만 학습한 AI가 이 종목을 맞혀 본 결과예요.")
         else:
             st.caption("과거 데이터를 시간순으로 나눠, 과거로 학습하고 그 다음 구간을 맞혀 본 결과(워크포워드 검증)예요.")
@@ -928,6 +929,16 @@ def indicator_table(p):
             val = fin.get(name, "자료 없음")
             used = "참고만" if name in fin else "✖"
         rows.append({"순위": rank, "지표": name, "유형": typ, "분석 내용": desc, "현재 값": val, "AI 반영(중요도)": used})
+    fl = [c for c in imp.index if c.startswith("fl_")]
+    if fl:  # 통합 모델은 수급(외국인·기관·개인 순매수, 전날까지)도 함께 배움
+        lf = p.latest_features
+        def q(c):
+            v = lf.get(c, float("nan"))
+            return "-" if v != v else f"{v * 100:+.0f}%"
+        rows.insert(0, {"순위": "+", "지표": "수급 (외국인·기관·개인)", "유형": "수급",
+                        "분석 내용": "최근 5일 하루 평균 순매수 ÷ 평소 하루 거래량 (전날까지 확정된 수급)",
+                        "현재 값": f"외국인 {q('fl_frg5')} · 기관 {q('fl_org5')} · 개인 {q('fl_ind5')}",
+                        "AI 반영(중요도)": f"✅ {imp.reindex(fl).sum() * 100:.1f}%"})
     st.dataframe(rows, hide_index=True, use_container_width=True, height=420)
     top = sorted(((imp.reindex(cols).sum(), name) for _, name, _, _, cols in table
                   if cols and set(cols) <= set(imp.index)), reverse=True)[:3]

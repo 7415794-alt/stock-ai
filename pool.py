@@ -20,6 +20,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
+from flow import FLOW_COLS
 from indicators import D1_COLS, cols_for
 
 HORIZONS = (1, 5, 20)
@@ -38,6 +39,12 @@ def is_kr(ticker: str) -> bool:
     return ticker.endswith((".KS", ".KQ"))
 
 
+def pool_cols(h: int, available=None) -> list[str]:
+    """통합 모델이 배우는 특성 = 기술 지표(cols_for) + 수급 지표(전날까지)."""
+    fl = [c for c in FLOW_COLS if available is None or c in available]
+    return cols_for(h) + fl
+
+
 def _naive(idx) -> pd.DatetimeIndex:
     idx = pd.DatetimeIndex(idx)
     return (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
@@ -45,12 +52,15 @@ def _naive(idx) -> pd.DatetimeIndex:
 
 # ───────────────────────── 학습 (GitHub Actions) ─────────────────────────
 
-def stock_frame(ticker: str, df: pd.DataFrame, mkt: pd.Series | None) -> pd.DataFrame:
-    """한 종목의 날짜별 지표 + 1·5·20일 뒤 수익률 (학습용 한 덩어리)."""
+def stock_frame(ticker: str, df: pd.DataFrame, mkt: pd.Series | None,
+                flow_raw: pd.DataFrame | None = None) -> pd.DataFrame:
+    """한 종목의 날짜별 지표(+ 전날까지 수급) + 1·5·20일 뒤 수익률 (학습용 한 덩어리)."""
+    from flow import attach
     from indicators import build_1d
     f = build_1d(df, mkt)[D1_COLS].astype("float32")
     c = df["Close"]
     dates = pd.Series(_naive(df.index), index=df.index)
+    f[FLOW_COLS] = attach(pd.DatetimeIndex(dates.to_numpy()), flow_raw).to_numpy()
     for h in HORIZONS:
         f[f"ret{h}"] = (c.shift(-h) / c - 1).astype("float32")
         f[f"end{h}"] = dates.shift(-h)
@@ -79,7 +89,7 @@ def train(feats: pd.DataFrame, out_dir: str | Path) -> pd.DataFrame:
     rank_rows, stat_rows = [], []
     for h in HORIZONS:
         t0 = time.time()
-        cols = cols_for(h)
+        cols = pool_cols(h, feats.columns)
         ret, end = f"ret{h}", f"end{h}"
         lab = feats[feats[ret].notna()]
 
@@ -134,7 +144,7 @@ def train(feats: pd.DataFrame, out_dir: str | Path) -> pd.DataFrame:
         # 앱용 적중 기록 (종목·날짜·확률만)
         oos[["ticker", "date", "prob"]].assign(ticker=lambda d: d["ticker"].astype("category")) \
             .to_parquet(out / f"track_{h}.parquet", index=False)
-        meta["horizons"][str(h)] = {"rows": int(len(lab)), "importances": {k: round(float(v), 5) for k, v in imp.items()},
+        meta["horizons"][str(h)] = {"rows": int(len(lab)), "cols": cols, "importances": {k: round(float(v), 5) for k, v in imp.items()},
                                     "oos_acc": round(float(done["hit"].mean()), 4),
                                     "oos_auc": round(float(roc_auc_score(done["up"], done["prob"])), 4)}
         print(f"pool h={h}: rows {len(lab):,}, {time.time() - t0:.0f}s, "
@@ -203,8 +213,13 @@ def predict_pooled(ticker: str, name: str, horizon: int, df: pd.DataFrame, mkt: 
 
     model, meta, stats = _load_model(horizon), _load_meta(), _load_stats()
     track = (_load_track(horizon) or {}).get(ticker)
-    cols = cols_for(horizon)
+    cols = meta["horizons"][str(horizon)].get("cols") or cols_for(horizon)  # 예전 모델(수급 없음)과도 호환
     feats = build_1d(df, mkt)
+    if any(c in FLOW_COLS for c in cols):  # 이 종목의 최근 수급(전날까지)을 붙임
+        import flow
+        fl = flow.attach(_naive(df.index), flow.live(ticker[:6]))
+        fl.index = feats.index
+        feats = pd.concat([feats, fl], axis=1)
     latest = feats[cols].iloc[-1]
     prob_up = float(model.predict_proba(latest.to_frame().T.astype("float32"))[0, 1])
 

@@ -19,6 +19,7 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+import flow  # noqa: E402
 import pool  # noqa: E402
 from market import halted, krx_status  # noqa: E402
 from predictor import load_history, load_index, load_krx, market_index  # noqa: E402
@@ -47,6 +48,20 @@ def build_part(part: int, parts: int) -> None:
         status = krx_status()  # 거래정지·관리종목·투자주의 (한 번에)
     except Exception:
         status = {}
+    # 수급 기록: 어제까지 저장해 둔 것에 최근 것만 이어 붙임 (처음엔 2021년부터 전부 받음)
+    cache = flow.load_cache()
+    print(f"part {part}: 저장된 수급 기록 {len(cache)}종목", flush=True)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def upd(code):
+        try:
+            return code, flow.update(code, cache.get(code))
+        except Exception:
+            return code, cache.get(code)
+
+    with ThreadPoolExecutor(4) as ex:
+        flows = {c: f for c, f in ex.map(upd, sorted({t[:6] for t in mine["ticker"]})) if f is not None and len(f)}
+    print(f"part {part}: 수급 {len(flows)}/{len(mine)}종목 ({time.time() - start:.0f}s)", flush=True)
     for n, r in enumerate(mine.itertuples(), 1):
         stt = status.get(r.ticker[:6]) or {"halted": halted(r.ticker), "managed": False, "alert": 0}
         if stt["halted"]:  # 거래정지 종목은 계산하지 않고 '거래정지'로만 표시
@@ -58,7 +73,7 @@ def build_part(part: int, parts: int) -> None:
         if df is None or len(df) < 300 or df.index[-1] < pd.Timestamp.now(tz=df.index.tz) - timedelta(days=10):
             continue
         try:
-            feats.append(pool.stock_frame(r.ticker, df, load_index(market_index(r.ticker))))
+            feats.append(pool.stock_frame(r.ticker, df, load_index(market_index(r.ticker)), flows.get(r.ticker[:6])))
         except Exception as e:
             print(f"skip {r.ticker}: {e}", flush=True)
             continue
@@ -74,7 +89,26 @@ def build_part(part: int, parts: int) -> None:
     pd.DataFrame(rows).to_csv(f"parts/part-{part}.csv", index=False, encoding="utf-8")
     if feats:
         pd.concat(feats, ignore_index=True).to_parquet(f"parts/feat-{part}.parquet", index=False)
+    if flows:
+        pd.concat([f.assign(code=c) for c, f in flows.items()], ignore_index=True)             .to_parquet(f"parts/flow-{part}.parquet", index=False)
     print(f"part {part} done: {len(rows)} rows, {time.time() - start:.0f}s")
+
+
+def save_flow_cache() -> None:
+    """오늘 받은 수급 + (오늘 못 받은 종목은) 어제 저장본 → out/flow/flow-0~9.parquet (내일 이어 받기용)."""
+    new = [pd.read_parquet(f) for f in sorted(Path("parts").rglob("flow-*.parquet"))]
+    new = pd.concat(new, ignore_index=True) if new else pd.DataFrame(columns=["code", "date"] + flow.RAW_COLS)
+    old = flow.load_cache()
+    keep = [f.assign(code=c) for c, f in old.items() if c not in set(new["code"])]
+    allf = pd.concat([new] + keep, ignore_index=True) if keep else new
+    if not len(allf):
+        return
+    allf["code"] = allf["code"].astype(str)
+    Path("out/flow").mkdir(parents=True, exist_ok=True)
+    allf = allf[["code", "date"] + flow.RAW_COLS].sort_values(["code", "date"])
+    for k, g in allf.groupby(allf["code"].map(flow.shard_of)):
+        g.to_parquet(f"out/flow/flow-{k}.parquet", index=False, compression="zstd")
+    print(f"수급 기록 저장: {allf['code'].nunique()}종목, {len(allf):,}줄", flush=True)
 
 
 def merge() -> None:
@@ -87,6 +121,10 @@ def merge() -> None:
     feats = pd.concat([pd.read_parquet(f) for f in sorted(Path("parts").rglob("feat-*.parquet"))],
                       ignore_index=True)
     print(f"학습 데이터: {feats['ticker'].nunique()}종목, {len(feats):,}줄", flush=True)
+    if flow.FLOW_COLS[0] in feats:
+        recent = feats[feats["date"] >= feats["date"].max() - pd.Timedelta(days=365)]
+        print(f"수급 있는 비율(최근 1년): {recent[flow.FLOW_COLS[0]].notna().mean():.1%}", flush=True)
+    save_flow_cache()
     res = pool.train(feats, "out/pool")
     build_themes(feats)
     del feats
