@@ -19,6 +19,7 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+import app_export  # noqa: E402
 import flow  # noqa: E402
 import pool  # noqa: E402
 from market import halted, krx_status  # noqa: E402
@@ -43,7 +44,7 @@ def fetch(ticker: str, tries: int = 3) -> pd.DataFrame | None:
 def build_part(part: int, parts: int) -> None:
     krx = load_krx().sort_values("ticker").reset_index(drop=True)
     mine = krx[krx.index % parts == part]
-    rows, feats, start = [], [], time.time()
+    rows, feats, app_rows, start = [], [], {}, time.time()
     try:
         status = krx_status()  # 거래정지·관리종목·투자주의 (한 번에)
     except Exception:
@@ -77,6 +78,10 @@ def build_part(part: int, parts: int) -> None:
         except Exception as e:
             print(f"skip {r.ticker}: {e}", flush=True)
             continue
+        try:  # 새 앱용: 차트·뉴스·기업 정보
+            app_rows[r.ticker] = app_export.part_payload(r.ticker, r.name, r.market, df, stt)
+        except Exception as e:
+            print(f"app skip {r.ticker}: {e}", flush=True)
         for h in HORIZONS:  # 확률·적중률은 merge에서 통합 모델로 채움
             rows.append({
                 "ticker": r.ticker, "name": r.name, "market": r.market, "horizon": h,
@@ -89,6 +94,8 @@ def build_part(part: int, parts: int) -> None:
     pd.DataFrame(rows).to_csv(f"parts/part-{part}.csv", index=False, encoding="utf-8")
     if feats:
         pd.concat(feats, ignore_index=True).to_parquet(f"parts/feat-{part}.parquet", index=False)
+    if app_rows:
+        Path(f"parts/app-{part}.json").write_text(json.dumps(app_rows, ensure_ascii=False), encoding="utf-8")
     if flows:
         pd.concat([f.assign(code=c) for c, f in flows.items()], ignore_index=True)             .to_parquet(f"parts/flow-{part}.parquet", index=False)
     print(f"part {part} done: {len(rows)} rows, {time.time() - start:.0f}s")
@@ -127,7 +134,15 @@ def merge() -> None:
     save_flow_cache()
     res = pool.train(feats, "out/pool")
     build_themes(feats)
+    keep = ["ticker"] + [c for c in feats.columns if c in set(pool.D1_COLS) | set(flow.FLOW_COLS)]
+    latest = feats.sort_values("date").groupby("ticker").tail(1)[keep]
     del feats
+    try:
+        app_export.export("out", info, res, latest)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print("앱 파일 만들기 실패:", e)
     res = res[["ticker", "horizon", "prob_up", "hit_rate", "hits", "n_recent"]].rename(columns={"n_recent": "n"})
     live = info[info["halted"] != 1].merge(res, on=["ticker", "horizon"], how="inner")
     df = pd.concat([live, info[info["halted"] == 1]], ignore_index=True)

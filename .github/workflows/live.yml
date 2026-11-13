@@ -1,0 +1,39 @@
+# 장중(평일 오전 9시~오후 4시) 20분마다 전 종목 현재가를 모아 'live' 브랜치에 저장합니다. (새 앱의 현재가용)
+name: 장중 가격
+
+on:
+  schedule:
+    - cron: "*/20 0-6 * * 1-5"   # 08:00 UTC 전까지 = 한국시간 09:00~15:59
+    - cron: "40 6 * * 1-5"       # 한국시간 15:40 (마감 가격 한 번 더)
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/live.yml", "live_build.py"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python live_build.py
+      - name: live 브랜치에 저장
+        run: |
+          cd out
+          git init -q -b live
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add live.json
+          git commit -q -m "장중 가격 $(date -u +%FT%H:%M)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" live
