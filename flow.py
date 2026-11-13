@@ -77,7 +77,9 @@ def update(code: str, old: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def shard_of(code: str) -> int:
-    return ord(str(code)[-1]) % SHARDS
+    """종목코드 → 0~9번 파일. 한국 종목코드는 대부분 0으로 끝나서, 끝자리 대신 코드 전체로 고르게 나눔."""
+    import zlib
+    return zlib.crc32(str(code).encode()) % SHARDS
 
 
 def load_cache(url: str = CACHE_URL) -> dict[str, pd.DataFrame]:
