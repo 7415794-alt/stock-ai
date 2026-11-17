@@ -1,0 +1,78 @@
+# 매일 장 마감 뒤 코스피·코스닥 전 종목을 계산해서 순위 파일을 'data' 브랜치에 저장합니다.
+name: AI 순위 계산
+
+on:
+  schedule:
+    - cron: "0 8 * * 1-5"   # 월~금 08:00 UTC = 한국시간 오후 5시
+  workflow_dispatch:         # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
+  push:                      # 이 파일이나 계산 코드를 고쳐서 올리면 바로 한 번 실행
+    branches: [main]
+    paths: [".github/workflows/rank.yml", ".github/trigger/rank.txt"]
+
+permissions:
+  contents: write
+
+# 새로 올리면 이전에 돌던 계산은 멈추고 최신 것만 계산
+concurrency:
+  group: rank
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4   # 계산 코드는 비공개 저장소(stock-ai-code)에서 읽어 옴
+        with:
+          repository: 7415794-alt/stock-ai-code
+          token: ${{ secrets.CODE_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python rank_build.py part ${{ matrix.part }} 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.part }}
+          path: parts/
+
+  merge:  # 전 종목 지표를 모아 통합 모델 학습 + 순위 파일 만들기
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4   # 계산 코드는 비공개 저장소(stock-ai-code)에서 읽어 옴
+        with:
+          repository: 7415794-alt/stock-ai-code
+          token: ${{ secrets.CODE_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts/
+      - run: python rank_build.py merge
+      - name: data 브랜치에 저장
+        run: |
+          cd out
+          git init -q -b data
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add rankings.csv meta.json   # 학습된 모델 파일(pool)은 공개하지 않음
+          [ -f prev_rankings.csv ] && git add prev_rankings.csv
+          [ -f scorecard.csv ] && git add scorecard.csv
+          [ -f themes.csv ] && git add themes.csv
+          [ -f theme_news.csv ] && git add theme_news.csv
+          [ -f theme_stats.csv ] && git add theme_stats.csv
+          [ -d flow ] && git add flow
+          [ -d app ] && git add app
+          git commit -q -m "순위 갱신 $(date -u +%F)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
