@@ -18,7 +18,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  list:  # 오늘의 전 종목 목록 (네이버 기준: 신규 상장 넣고 상장 폐지 빼고 이름 맞춤) → 모든 계산이 같은 목록을 씀
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4   # 계산 코드는 비공개 저장소(stock-ai-code)에서 읽어 옴
+        with:
+          repository: 7415794-alt/stock-ai-code
+          token: ${{ secrets.CODE_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install requests pandas lxml
+      - run: python build_stock_list.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-list
+          path: krx_stocks.csv
+
   build:
+    needs: list
+    if: ${{ !cancelled() }}   # 목록 단계가 실패해도 저장된 목록으로 계산
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -35,6 +56,11 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stock-list
+          path: .
       - run: python rank_build.py part ${{ matrix.part }} 20
       - uses: actions/upload-artifact@v4
         with:
@@ -56,6 +82,11 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stock-list
+          path: .
       - uses: actions/download-artifact@v4
         with:
           path: parts/
