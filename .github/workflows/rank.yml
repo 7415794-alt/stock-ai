@@ -91,6 +91,8 @@ jobs:
         with:
           path: parts/
       - run: python rank_build.py merge
+        env:
+          DART_KEY: ${{ secrets.DART_KEY }}   # 전자공시(OpenDART) 키: 최근 실적 공시·재무를 받아 AI 재료로 씀 (없으면 저장된 기록만)
       - name: data 브랜치에 저장
         run: |
           cd out
