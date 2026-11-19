@@ -1,10 +1,12 @@
-# 장중(평일 오전 9시~오후 4시) 20분마다 전 종목 현재가를 모아 'live' 브랜치에 저장합니다. (새 앱의 현재가용)
+# 장중(평일 오전 9시~오후 4시) 20분마다 전 종목 현재가와 🔥 오늘 이슈를 모아 'live' 브랜치에 저장합니다.
+# 장 시작 전(오전 8시대)에는 밤사이 뉴스로 '장 전 주목 이슈'만 만듭니다.
 name: 장중 가격
 
 on:
   schedule:
     - cron: "*/20 0-6 * * 1-5"   # 08:00 UTC 전까지 = 한국시간 09:00~15:59
     - cron: "40 6 * * 1-5"       # 한국시간 15:40 (마감 가격 한 번 더)
+    - cron: "*/20 23 * * 0-4"    # 한국시간 평일 08:00~08:40 (장 전 주목 이슈)
   workflow_dispatch:
   push:
     branches: [main]
@@ -37,6 +39,6 @@ jobs:
           git init -q -b live
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add live.json
-          git commit -q -m "장중 가격 $(date -u +%FT%H:%M)"
+          git add -A
+          git commit -q -m "장중 가격·이슈 $(date -u +%FT%H:%M)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" live
