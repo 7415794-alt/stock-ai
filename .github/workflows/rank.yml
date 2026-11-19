@@ -107,5 +107,6 @@ jobs:
           [ -f theme_stats.csv ] && git add theme_stats.csv
           [ -d flow ] && git add flow
           [ -d app ] && git add app
+          [ -d dart ] && git add dart   # 공시 자료 이어 받기용
           git commit -q -m "순위 갱신 $(date -u +%F)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
