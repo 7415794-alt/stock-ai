@@ -93,6 +93,8 @@ jobs:
       - run: python rank_build.py merge
         env:
           DART_KEY: ${{ secrets.DART_KEY }}   # 전자공시(OpenDART) 키: 최근 실적 공시·재무를 받아 AI 재료로 씀 (없으면 저장된 기록만)
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}   # 휴대폰 알림 서명 키
+          PUSH_KEY: ${{ secrets.PUSH_KEY }}             # 알림 서버(구독 목록) 열쇠
       - name: data 브랜치에 저장
         run: |
           cd out

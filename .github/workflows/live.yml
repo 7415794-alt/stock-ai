@@ -31,8 +31,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
+      - run: pip install requests pywebpush
       - run: python live_build.py
+        env:
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}   # 휴대폰 알림 서명 키
+          PUSH_KEY: ${{ secrets.PUSH_KEY }}             # 알림 서버(구독 목록) 열쇠
       - name: live 브랜치에 저장
         run: |
           cd out
