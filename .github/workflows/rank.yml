@@ -71,7 +71,7 @@ jobs:
     needs: build
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 340  # 최대 6시간까지 가능. 3시간에 걸려 이틀 멈춘 적 있어 늘림
     steps:
       - uses: actions/checkout@v4   # 계산 코드는 비공개 저장소(stock-ai-code)에서 읽어 옴
         with:
